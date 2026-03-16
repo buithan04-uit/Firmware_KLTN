@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HealthOS Pro - Final UI</title>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Oswald:wght@500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+    <style>
+        :root {
+            --bg-body: #1a1a1a;
+            --bg-screen: #000000;
+            --bg-panel: #111;
+            --color-primary: #00E5FF; /* Cyan */
+            --color-success: #00E676; /* Green */
+            --color-danger: #FF1744;  /* Red */
+            --color-warn: #FF9100;    /* Orange */
+            --text-main: #FFFFFF;
+            --border-focus: 2px solid #00E5FF;
+        }
+
+        body {
+            background-color: var(--bg-body);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            font-family: 'JetBrains Mono', monospace;
+            color: var(--text-main);
+            user-select: none;
+        }
+
+        .device-wrapper {
+            background: #2b2b2b;
+            padding: 20px;
+            border-radius: 24px;
+            box-shadow: 0 25px 60px rgba(0,0,0,0.6);
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            align-items: center;
+            border: 1px solid #444;
+        }
+
+        #screen {
+            width: 320px;
+            height: 240px;
+            background-color: var(--bg-screen);
+            position: relative;
+            overflow: hidden;
+            border: 2px solid #333;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* HEADER */
+        .header {
+            height: 22px;
+            background: #0a0a0a;
+            border-bottom: 1px solid #222;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 8px;
+            font-size: 9px;
+            z-index: 10;
+        }
+        .header-title { color: var(--color-primary); font-weight: bold; letter-spacing: 1px; }
+
+        /* VIEWS */
+        .view {
+            flex: 1;
+            display: none;
+            flex-direction: column;
+            position: relative;
+            overflow: hidden;
+        }
+        .view.active { display: flex; }
+
+        /* MENU GRID */
+        .menu-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            grid-template-rows: repeat(2, 1fr);
+            gap: 4px;
+            padding: 10px;
+            height: 100%;
+            box-sizing: border-box;
+        }
+        .menu-item {
+            background: var(--bg-panel);
+            border: 1px solid #333;
+            border-radius: 6px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 5px;
+            cursor: pointer;
+            transition: all 0.1s;
+        }
+        .menu-item i { font-size: 18px; color: #666; }
+        .menu-item span { font-size: 9px; text-transform: uppercase; color: #888; }
+        .menu-item.focused { border: var(--border-focus); background: #00222b; }
+        .menu-item.focused i { color: var(--color-primary); }
+        .menu-item.focused span { color: #fff; }
+
+        /* MONITOR BIG FONT */
+        .monitor-layout { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; gap: 4px; padding: 4px; height: 100%; }
+        .mon-box { background: #0f0f0f; border: 1px solid #222; border-radius: 4px; display: flex; flex-direction: column; align-items: center; justify-content: center; position: relative; }
+        .mon-box.wide { grid-column: span 2; flex-direction: row; justify-content: space-around; }
+        .mon-label { font-size: 10px; color: #666; position: absolute; top: 4px; left: 6px; }
+        .mon-val { font-family: 'Oswald'; font-size: 52px; line-height: 1; font-weight: 700; }
+        .mon-unit { font-size: 12px; color: #888; margin-top: -5px; }
+
+        /* --- NEW: HR/SPO2 LAYOUT --- */
+        .spo2-layout {
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+        }
+        .spo2-stats-row {
+            flex: 2; /* Chiếm 2/3 chiều cao */
+            display: flex;
+            border-bottom: 1px solid #222;
+        }
+        .spo2-stat-col {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            position: relative;
+        }
+        .spo2-stat-col:first-child { border-right: 1px solid #222; }
+        
+        .spo2-wave-row {
+            flex: 1; /* Chiếm 1/3 chiều cao */
+            background: #000;
+            position: relative;
+            display: flex;
+            align-items: flex-end;
+            overflow: hidden;
+        }
+
+        .split-val { font-family: 'Oswald'; font-size: 60px; line-height: 1; z-index: 2; }
+
+        /* TEMP VIEW */
+        .temp-layout { display: flex; flex-direction: column; height: 100%; position: relative; }
+        .temp-ambient { position: absolute; top: 10px; right: 10px; text-align: right; background: #111; padding: 4px 8px; border-radius: 4px; border: 1px solid #333; }
+        .temp-body { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; margin-top: 10px; }
+        .temp-circle { width: 130px; height: 130px; border-radius: 50%; border: 4px solid #333; border-top-color: var(--color-warn); display: flex; flex-direction: column; align-items: center; justify-content: center; background: radial-gradient(circle, #222 0%, #000 70%); }
+        .temp-status-bar { height: 30px; background: #111; border-top: 1px solid #333; display: flex; align-items: center; justify-content: center; font-size: 11px; letter-spacing: 1px; text-transform: uppercase; }
+
+        /* --- NEW: KEYBOARD STYLES --- */
+        .pass-input-area {
+            background: #111;
+            border-bottom: 1px solid #333;
+            color: var(--color-primary);
+            padding: 8px;
+            font-size: 14px;
+            text-align: center;
+            height: 25px;
+            letter-spacing: 2px;
+            font-family: monospace;
+        }
+        .keyboard-grid {
+            display: grid;
+            grid-template-columns: repeat(10, 1fr);
+            gap: 3px;
+            padding: 6px;
+            background: #050505;
+            flex: 1; /* Fill remaining space */
+        }
+        .key {
+            background: #222;
+            height: 24px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 11px;
+            border-radius: 3px;
+            color: #ccc;
+            cursor: pointer;
+            border: 1px solid #333;
+        }
+        .key.focused {
+            background: var(--color-primary);
+            color: #000;
+            font-weight: bold;
+            border-color: #fff;
+            box-shadow: 0 0 8px rgba(0, 229, 255, 0.4);
+        }
+        .key.action {
+            background: #333;
+            color: #fff;
+            grid-column: span 2;
+            font-size: 9px;
+            font-weight: bold;
+        }
+
+        /* SVG WAVES */
+        .ecg-svg { width: 100%; height: 100%; }
+        .ecg-path {
+            fill: none;
+            stroke-width: 2;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+            stroke-dasharray: 600;
+            stroke-dashoffset: 600;
+            animation: drawWave 3s linear infinite;
+        }
+        @keyframes drawWave { to { stroke-dashoffset: 0; } }
+
+        /* CONTROLS */
+        .controls { display: grid; grid-template-columns: repeat(3, 50px); gap: 6px; }
+        .btn-phys { height: 40px; background: #222; border: 1px solid #333; color: #aaa; border-radius: 6px; cursor: pointer; box-shadow: 0 4px 0 #111; }
+        .btn-phys:active { transform: translateY(4px); box-shadow: none; }
+        .btn-ok { background: var(--color-primary); color: #000; font-weight: bold; border: none; }
+    </style>
+</head>
+<body>
+
+    <div class="device-wrapper">
+        <div id="screen">
+            <div class="header">
+                <span class="header-title" id="head-title">MAIN MENU</span>
+                <div class="header-icons">
+                    <i class="fas fa-wifi" id="icon-wifi" style="font-size: 9px; color: #444;"></i>
+                    <i class="fas fa-battery-full" style="color: var(--color-success); margin-left:5px;"></i>
+                </div>
+            </div>
+
+            <div id="view-menu" class="view active">
+                <div class="menu-grid">
+                    <div class="menu-item focused" data-goto="view-monitor"><i class="fas fa-desktop"></i><span>Monitor</span></div>
+                    <div class="menu-item" data-goto="view-ecg"><i class="fas fa-heartbeat"></i><span>ECG</span></div>
+                    <div class="menu-item" data-goto="view-spo2"><i class="fas fa-lungs"></i><span>HR / SpO2</span></div>
+                    <div class="menu-item" data-goto="view-temp"><i class="fas fa-thermometer-half"></i><span>Temp</span></div>
+                    <div class="menu-item" data-goto="view-wifi-scan"><i class="fas fa-wifi"></i><span>Wifi</span></div>
+                    <div class="menu-item" data-goto="view-config"><i class="fas fa-cog"></i><span>Config</span></div>
+                </div>
+            </div>
+
+            <div id="view-monitor" class="view">
+                <div class="monitor-layout">
+                    <div class="mon-box">
+                        <span class="mon-label">HR</span>
+                        <span class="mon-val" style="color: var(--color-danger);">75</span>
+                        <span class="mon-unit">BPM</span>
+                    </div>
+                    <div class="mon-box">
+                        <span class="mon-label">SpO2</span>
+                        <span class="mon-val" style="color: var(--color-primary);">98</span>
+                        <span class="mon-unit">%</span>
+                    </div>
+                    <div class="mon-box wide">
+                        <div style="text-align:center">
+                            <span style="font-size:10px; color:#666; display:block">BODY TEMP</span>
+                            <span class="mon-val" style="color: var(--color-warn); font-size: 40px;">36.5</span>
+                        </div>
+                        <div style="height:30px; border-left:1px solid #333;"></div>
+                        <div style="text-align:center">
+                            <span style="font-size:10px; color:#666; display:block">ENV TEMP</span>
+                            <span style="font-size:24px; color: #888; font-family:'Oswald'">28°C</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div id="view-spo2" class="view">
+                <div class="spo2-layout">
+                    <div class="spo2-stats-row">
+                        <div class="spo2-stat-col" style="background: linear-gradient(180deg, #1a0000 0%, #000 100%);">
+                            <i class="fas fa-heart" style="color: var(--color-danger); font-size: 14px; margin-bottom: 5px;"></i>
+                            <span style="font-size: 8px; color: #888;">HEART RATE</span>
+                            <span class="split-val" style="color: var(--color-danger);">75</span>
+                            <span style="font-size: 10px; color: #555;">BPM</span>
+                        </div>
+                        <div class="spo2-stat-col" style="background: linear-gradient(180deg, #001a1a 0%, #000 100%);">
+                            <i class="fas fa-lungs" style="color: var(--color-primary); font-size: 14px; margin-bottom: 5px;"></i>
+                            <span style="font-size: 8px; color: #888;">OXYGEN</span>
+                            <span class="split-val" style="color: var(--color-primary);">98</span>
+                            <span style="font-size: 10px; color: #555;">%</span>
+                        </div>
+                    </div>
+                    
+                    <div class="spo2-wave-row">
+                        <div style="position:absolute; top:2px; left:5px; font-size:8px; color:#444;">PLETH WAVE</div>
+                        <svg class="ecg-svg" viewBox="0 0 200 50" preserveAspectRatio="none">
+                            <path class="ecg-path" d="M0,40 Q10,40 15,30 Q20,10 25,30 Q30,40 40,40 T55,30 T80,40 T95,30 T120,40 T135,30 T160,40 T175,30 T200,40" stroke="var(--color-primary)" fill="none" />
+                        </svg>
+                    </div>
+                </div>
+            </div>
+
+            <div id="view-temp" class="view">
+                <div class="temp-layout">
+                    <div class="temp-ambient">
+                        <span style="font-size:9px; color:#888; display:block;">AMBIENT</span>
+                        <span style="font-size:14px; color:#fff;"><i class="fas fa-cloud-sun"></i> 28°C</span>
+                    </div>
+                    <div class="temp-body">
+                        <div class="temp-circle">
+                            <span style="font-family:'Oswald'; font-size:45px; color:var(--color-warn); line-height:1;">36.5</span>
+                            <span style="font-size:10px; color:#666;">CELSIUS</span>
+                        </div>
+                    </div>
+                    <div class="temp-status-bar" style="color: var(--color-success);">
+                        <i class="fas fa-check-circle" style="margin-right:5px;"></i> STATUS: NORMAL
+                    </div>
+                </div>
+            </div>
+
+            <div id="view-wifi-scan" class="view">
+                <div style="padding:5px; font-size:10px; color:#666; border-bottom:1px solid #222;">AVAILABLE NETWORKS</div>
+                <div id="wifi-list" style="padding:5px; display:flex; flex-direction:column; gap:2px;"></div>
+            </div>
+
+            <div id="view-wifi-pass" class="view">
+                <div style="padding:5px 5px 0 5px; font-size:9px; color:#666;">PASS FOR: <span id="target-wifi" style="color:#fff"></span></div>
+                <div class="pass-input-area" id="pass-display"></div>
+                <div class="keyboard-grid" id="keyboard"></div>
+            </div>
+
+            <div id="view-config" class="view">
+                <div style="text-align:center; margin-top:40px;">
+                    <div style="font-size:10px; color:#888;">WEB CONFIG IP</div>
+                    <div style="font-size:22px; color:var(--color-primary); border:1px dashed #333; padding:10px; margin:10px 0; display:inline-block;">192.168.4.1</div>
+                    <div style="font-size:9px; color:#666;">Connect to AP to configure</div>
+                </div>
+            </div>
+             
+             <div id="view-ecg" class="view">
+                 <div style="flex:1; background:#000; position:relative; display:flex; align-items:center; overflow:hidden;">
+                    <div style="position:absolute; inset:0; background-image: linear-gradient(#111 1px, transparent 1px), linear-gradient(90deg, #111 1px, transparent 1px); background-size: 20px 20px; z-index:0;"></div>
+                    <svg class="ecg-svg" viewBox="0 0 300 100" preserveAspectRatio="none" style="z-index:1; height:60%;">
+                        <path class="ecg-path" d="M0,50 L20,50 L30,40 L40,60 L50,50 L70,50 L75,20 L85,90 L95,50 L110,50 L120,40 L130,60 L140,50 L160,50 L165,20 L175,90 L185,50 L200,50 L210,40 L220,60 L230,50 L250,50 L255,20 L265,90 L275,50 L300,50" stroke="var(--color-success)" fill="none" />
+                    </svg>
+                 </div>
+                 <div style="height:20px; background:#111; display:flex; justify-content:space-between; align-items:center; padding:0 10px;">
+                     <span style="font-size:9px; color:var(--color-success)">LIVE LEAD I</span>
+                     <span style="font-size:9px; color:#666">25mm/s</span>
+                 </div>
+             </div>
+
+        </div>
+
+        <div class="controls">
+            <button class="btn-phys" onclick="input('BACK')"><i class="fas fa-undo"></i></button>
+            <button class="btn-phys" onclick="input('UP')"><i class="fas fa-caret-up"></i></button>
+            <button class="btn-phys" onclick="location.reload()"><i class="fas fa-power-off"></i></button>
+            <button class="btn-phys" onclick="input('LEFT')"><i class="fas fa-caret-left"></i></button>
+            <button class="btn-phys btn-ok" onclick="input('OK')">OK</button>
+            <button class="btn-phys" onclick="input('RIGHT')"><i class="fas fa-caret-right"></i></button>
+            <div></div>
+            <button class="btn-phys" onclick="input('DOWN')"><i class="fas fa-caret-down"></i></button>
+            <div></div>
+        </div>
+    </div>
+
+    <script>
+        const wifiData = [{ssid: "Home_Wifi", rssi: 90}, {ssid: "Office_5G", rssi: 70}, {ssid: "Guest", rssi: 50}];
+        // Bàn phím QWERTY đầy đủ
+        const keyboardKeys = [
+            "1","2","3","4","5","6","7","8","9","0",
+            "q","w","e","r","t","y","u","i","o","p",
+            "a","s","d","f","g","h","j","k","l","@",
+            "z","x","c","v","b","n","m",".","_","-"
+        ];
+        
+        let state = { screen: 'view-menu', idx: 0, wifiSSID: '', pass: '' };
+
+        function init() {
+            // Render Wifi List
+            document.getElementById('wifi-list').innerHTML = wifiData.map(w => `
+                <div class="menu-item" style="flex-direction:row; justify-content:space-between; padding:8px 10px;">
+                    <span>${w.ssid}</span><span>${w.rssi}%</span>
+                </div>
+            `).join('');
+
+            // Render Keyboard - Sửa lỗi không hiện bàn phím
+            let kbHtml = keyboardKeys.map(k => `<div class="key">${k}</div>`).join('');
+            kbHtml += `<div class="key action" data-act="BACK">◄ BACK</div><div class="key action" data-act="DEL">DEL</div><div class="key action" data-act="DONE">CONNECT</div>`;
+            document.getElementById('keyboard').innerHTML = kbHtml;
+            
+            updateView();
+        }
+
+        function updateView() {
+            document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+            document.getElementById(state.screen).classList.add('active');
+            
+            const titles = {
+                'view-menu':'MAIN MENU',
+                'view-monitor':'MONITOR DASH',
+                'view-spo2':'HR & SPO2',
+                'view-temp':'THERMOMETER',
+                'view-ecg': 'ECG CHART',
+                'view-wifi-pass': 'ENTER PASSWORD'
+            };
+            document.getElementById('head-title').innerText = titles[state.screen] || 'SYSTEM';
+
+            // Reset focus styling
+            document.querySelectorAll('.focused').forEach(el => el.classList.remove('focused'));
+
+            const items = getFocusable();
+            if (items.length > 0) {
+                // Bounds safety
+                if(state.idx >= items.length) state.idx = 0;
+                if(state.idx < 0) state.idx = items.length - 1;
+                items[state.idx].classList.add('focused');
+                
+                // Chỉ scroll nếu không phải bàn phím (để bàn phím cố định đẹp hơn)
+                if(state.screen !== 'view-wifi-pass') {
+                    items[state.idx].scrollIntoView({block: 'nearest'});
+                }
+            }
+            
+            if(state.screen === 'view-wifi-pass') {
+                document.getElementById('pass-display').innerText = state.pass + (state.pass.length === 0 ? "|" : ""); 
+                document.getElementById('target-wifi').innerText = state.wifiSSID;
+            }
+        }
+
+        function getFocusable() {
+            const s = document.getElementById(state.screen);
+            if (state.screen === 'view-menu') return s.querySelectorAll('.menu-item');
+            if (state.screen === 'view-wifi-scan') return s.querySelectorAll('.menu-item');
+            if (state.screen === 'view-wifi-pass') return s.querySelectorAll('.key');
+            return [];
+        }
+
+        function input(act) {
+            const items = getFocusable();
+            // Số cột: Menu=3, Keyboard=10, List=1
+            const cols = (state.screen === 'view-menu') ? 3 : (state.screen === 'view-wifi-pass' ? 10 : 1);
+
+            if (act === 'BACK') {
+                if(state.screen === 'view-wifi-pass') state.screen = 'view-wifi-scan';
+                else if(state.screen !== 'view-menu') state.screen = 'view-menu';
+                state.idx = 0;
+                updateView();
+                return;
+            }
+
+            if (items.length > 0) {
+                if (act === 'RIGHT' && (state.idx + 1) % cols !== 0) state.idx++;
+                if (act === 'LEFT' && state.idx % cols !== 0) state.idx--;
+                if (act === 'DOWN' && state.idx + cols < items.length) state.idx += cols;
+                if (act === 'UP' && state.idx - cols >= 0) state.idx -= cols;
+                
+                if (cols === 1) { // List logic
+                    if (act === 'DOWN' && state.idx < items.length -1) state.idx++;
+                    if (act === 'UP' && state.idx > 0) state.idx--;
+                }
+            }
+
+            if (act === 'OK') {
+                if (state.screen === 'view-menu') {
+                    state.screen = items[state.idx].dataset.goto;
+                    state.idx = 0;
+                } else if (state.screen === 'view-wifi-scan') {
+                    state.wifiSSID = wifiData[state.idx].querySelector('span').innerText;
+                    state.pass = '';
+                    state.screen = 'view-wifi-pass';
+                    state.idx = 0;
+                } else if (state.screen === 'view-wifi-pass') {
+                    const keyEl = items[state.idx];
+                    if(keyEl.dataset.act === 'BACK') {
+                        state.screen = 'view-wifi-scan';
+                        state.idx = 0;
+                    }
+                    else if(keyEl.dataset.act === 'DEL') state.pass = state.pass.slice(0, -1);
+                    else if(keyEl.dataset.act === 'DONE') {
+                         document.getElementById('icon-wifi').style.color = '#00E676';
+                         state.screen = 'view-menu';
+                         state.idx = 0;
+                    } else state.pass += keyEl.innerText;
+                }
+            }
+            updateView();
+        }
+
+        document.addEventListener('keydown', e => {
+            const m = {'ArrowUp':'UP','ArrowDown':'DOWN','ArrowLeft':'LEFT','ArrowRight':'RIGHT','Enter':'OK','Escape':'BACK'};
+            if(m[e.key]) input(m[e.key]);
+        });
+
+        init();
+    </script>
+</body>
+</html>

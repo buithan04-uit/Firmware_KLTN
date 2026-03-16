@@ -1,0 +1,12 @@
+# Batch file to regenerate all icons with correct codepoints
+# Format: icon_name hex_code
+
+monitor ef5b
+ecg f80f
+oxygen e4de
+lung e127
+wifi e63e
+config e8b8
+heart e87d
+battery e1a4
+ip_address eb2f
