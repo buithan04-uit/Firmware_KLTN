@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include "ui.h"
 
+TFT_eSPI tft = TFT_eSPI();
 bool in_menu = false;
 
 // Hàm in bộ nhớ trống

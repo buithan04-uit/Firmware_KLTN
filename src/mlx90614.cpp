@@ -8,6 +8,9 @@
 #define I2C_SDA 21
 #define I2C_SCL 22
 #define I2C_FREQ 100000
+#define I2C_SCAN_INTERVAL_MS 1000 // Scan I2C lien tuc moi 1 giay
+#define MLX90614_ADDR 0x5A
+#define MLX_RETRY_INIT_INTERVAL_MS 2000
 
 #define FILTER_SIZE 10      // Lọc 10 mẫu (Độ trễ thấp, phản hồi nhanh)
 #define BODY_THRESHOLD 32.0 // Ngưỡng tối thiểu để coi là Da Người
@@ -20,6 +23,89 @@ int readIndex = 0;
 float total = 0;
 float average = 0;
 bool bufferFilled = false;
+unsigned long lastI2CScanMs = 0;
+unsigned long lastInitRetryMs = 0;
+bool mlxPresent = false;
+bool mlxInitialized = false;
+uint8_t mlxReadErrorCount = 0;
+
+bool isI2CAddressPresent(uint8_t address)
+{
+  Wire.beginTransmission(address);
+  return (Wire.endTransmission() == 0);
+}
+
+void scanI2CDevices()
+{
+  int found = 0;
+  Serial.println("--- I2C SCAN START ---");
+
+  for (uint8_t address = 0x03; address <= 0x77; address++)
+  {
+    Wire.beginTransmission(address);
+    uint8_t error = Wire.endTransmission();
+
+    if (error == 0)
+    {
+      Serial.print("Tim thay I2C device tai 0x");
+      if (address < 16)
+        Serial.print('0');
+      Serial.println(address, HEX);
+      found++;
+    }
+  }
+
+  if (found == 0)
+  {
+    Serial.println("Khong tim thay I2C device nao");
+  }
+  else
+  {
+    Serial.print("Tong so I2C device: ");
+    Serial.println(found);
+  }
+
+  Serial.println("--- I2C SCAN END ---");
+}
+
+void refreshMLXStatus()
+{
+  bool presentNow = isI2CAddressPresent(MLX90614_ADDR);
+
+  if (presentNow != mlxPresent)
+  {
+    mlxPresent = presentNow;
+    if (mlxPresent)
+    {
+      Serial.println("[MLX90614] Da phat hien lai tai 0x5A");
+    }
+    else
+    {
+      Serial.println("[MLX90614] Mat ket noi I2C (0x5A)");
+      mlxInitialized = false;
+    }
+  }
+
+  if (mlxPresent && !mlxInitialized)
+  {
+    unsigned long now = millis();
+    if (now - lastInitRetryMs >= MLX_RETRY_INIT_INTERVAL_MS)
+    {
+      lastInitRetryMs = now;
+      Serial.println("[MLX90614] Thu khoi tao lai...");
+      mlxInitialized = mlx.begin();
+      if (mlxInitialized)
+      {
+        mlxReadErrorCount = 0;
+        Serial.println("[MLX90614] Khoi tao thanh cong");
+      }
+      else
+      {
+        Serial.println("[MLX90614] Khoi tao that bai");
+      }
+    }
+  }
+}
 
 void setup()
 {
@@ -27,12 +113,23 @@ void setup()
   Wire.begin(I2C_SDA, I2C_SCL);
   Wire.setClock(I2C_FREQ);
 
-  if (!mlx.begin())
+  delay(300);
+  scanI2CDevices();
+
+  mlxPresent = isI2CAddressPresent(MLX90614_ADDR);
+  if (mlxPresent)
   {
-    Serial.println("Loi ket noi MLX90614");
-    while (1)
-      ;
+    mlxInitialized = mlx.begin();
+    if (!mlxInitialized)
+    {
+      Serial.println("Loi khoi tao MLX90614, se tu dong thu lai");
+    }
   }
+  else
+  {
+    Serial.println("Chua thay MLX90614 (0x5A), se quet lien tuc");
+  }
+
   Serial.println("--- HE THONG DO NHIET DO CHINH XAC ---");
   // Reset bộ lọc
   for (int i = 0; i < FILTER_SIZE; i++)
@@ -64,11 +161,37 @@ float calculateBodyTemp(float skinTemp, float ambientTemp)
 
 void loop()
 {
+  unsigned long now = millis();
+  if (now - lastI2CScanMs >= I2C_SCAN_INTERVAL_MS)
+  {
+    scanI2CDevices();
+    refreshMLXStatus();
+    lastI2CScanMs = now;
+  }
+
+  if (!mlxPresent || !mlxInitialized)
+  {
+    delay(100);
+    return;
+  }
+
   float rawObj = mlx.readObjectTempC();
   float rawAmb = mlx.readAmbientTempC();
 
-  if (isnan(rawObj))
+  if (isnan(rawObj) || isnan(rawAmb))
+  {
+    mlxReadErrorCount++;
+    if (mlxReadErrorCount >= 3)
+    {
+      Serial.println("[MLX90614] Loi doc nhiet do, thu khoi tao lai");
+      mlxInitialized = false;
+      mlxReadErrorCount = 0;
+    }
+    delay(100);
     return;
+  }
+
+  mlxReadErrorCount = 0;
 
   // --- BỘ LỌC TRUNG BÌNH ---
   total = total - readings[readIndex];

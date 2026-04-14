@@ -20,8 +20,8 @@
  *   - 3.3V, GND
  *
  * ADS1115:
- *   - SDA -> GPIO 21
- *   - SCL -> GPIO 22
+ *   - SDA -> GPIO 4
+ *   - SCL -> GPIO 5
  *   - VDD -> 3.3V
  *   - GND -> GND
  */
@@ -35,8 +35,8 @@
 // ==========================================
 #define LO_PLUS_PIN 13  // Lead-off detection positive
 #define LO_MINUS_PIN 14 // Lead-off detection negative
-#define I2C_SDA 21
-#define I2C_SCL 22
+#define I2C_SDA 4
+#define I2C_SCL 5
 
 // ==========================================
 // CẤU HÌNH BỘ LỌC
@@ -70,12 +70,13 @@
 // ==========================================
 // PHÁT HIỆN NHỊP TIM (R-R Interval)
 // ==========================================
-#define HR_REFRACTORY_MS 360 // Min 360ms giữa 2 nhịp (~166 BPM max)
-#define HR_TIMEOUT_MS 2000   // Timeout 2s nếu không có nhịp
+#define HR_REFRACTORY_MS 430 // Min 430ms giữa 2 nhịp (~139 BPM max), giảm double count
+#define HR_TIMEOUT_MS 4500   // Timeout 4.5s để tránh mất BPM khi tín hiệu yếu ngắn hạn
 #define HR_MIN_BPM 45
-#define HR_MAX_BPM 170
-#define HR_STARTUP_BLANK_MS 1500
+#define HR_MAX_BPM 130
+#define HR_STARTUP_BLANK_MS 1100
 #define HR_RR_BUFFER 8 // Số R-R intervals để tính trung bình
+#define HR_BPM_LP_ALPHA 0.68f
 
 // ==========================================
 // BIẾN TOÀN CỤC
@@ -111,8 +112,12 @@ float rrIntervals[HR_RR_BUFFER];
 int rrIndex = 0;
 int rrCount = 0;
 float derivBaseline = 0;
-float prevFilteredDeriv = 0;
 bool beatDetected = false;
+unsigned long hrFirstValidMs = 0;
+float hrPrevAbs1 = 0;
+float hrPrevAbs2 = 0;
+float hrInstantBpmLp = 0;
+bool hrInstantInit = false;
 
 // Trạng thái
 bool leadsConnected = false;
@@ -120,6 +125,7 @@ float rawSignal = 0;
 float filteredSignal = 0;
 float hrInputSignal = 0;
 float displayBaseline = 0;
+bool adsAvailable = false;
 
 // ==========================================
 // HÀM KHỞI TẠO
@@ -144,22 +150,30 @@ void initAD8232()
     {
         Serial.println("ERROR: Không tìm thấy ADS1115!");
         Serial.println("Kiểm tra kết nối I2C:");
-        Serial.println("  - SDA -> GPIO 21");
-        Serial.println("  - SCL -> GPIO 22");
+        Serial.println("  - SDA -> GPIO 4");
+        Serial.println("  - SCL -> GPIO 5");
         Serial.println("  - VDD -> 3.3V");
         Serial.println("  - GND -> GND");
-        while (1)
-            delay(10);
+        Serial.println("⚠️  Continue without ADS1115 (UI vẫn chạy, ECG = 0)");
+        adsAvailable = false;
+        leadsConnected = false;
+        rawSignal = 0;
+        filteredSignal = 0;
+        hrInputSignal = 0;
+        heartRate = 0;
+        return;
     }
+
+    adsAvailable = true;
 
     // Cấu hình ADS1115
     // Dùng GAIN_ONE để bao trọn dải 0-3.3V của AD8232, tránh clipping đỉnh R
     ads.setGain(GAIN_ONE);                // ±4.096V range
-    ads.setDataRate(RATE_ADS1115_860SPS); // Tối đa tốc độ chuyển đổi
+    ads.setDataRate(RATE_ADS1115_475SPS); // 475 SPS ổn định nhiễu hơn cho ECG
 
     Serial.println("⚙️  ADS1115 Config:");
     Serial.println("   - Gain: ±4.096V (0.125 mV/bit)");
-    Serial.println("   - Rate: 860 SPS");
+    Serial.println("   - Rate: 475 SPS");
 
     Serial.println("✓ ADS1115 khởi tạo thành công");
 
@@ -355,6 +369,15 @@ bool checkLeadsConnected()
 // ==========================================
 void readAndFilterECG()
 {
+    if (!adsAvailable)
+    {
+        leadsConnected = false;
+        rawSignal = 0;
+        filteredSignal = 0;
+        heartRate = 0;
+        return;
+    }
+
     // Kiểm tra lead-off
     leadsConnected = checkLeadsConnected();
 
@@ -364,6 +387,16 @@ void readAndFilterECG()
         rawSignal = 0;
         filteredSignal = 0;
         heartRate = 0;
+        rrIndex = 0;
+        rrCount = 0;
+        derivBaseline = 0;
+        hrFirstValidMs = 0;
+        hrPrevAbs1 = 0;
+        hrPrevAbs2 = 0;
+        hrInstantBpmLp = 0;
+        hrInstantInit = false;
+        lastRPeakTime = 0;
+        beatDetected = false;
 
         // Cảnh báo (mỗi 2s để tránh spam)
         static unsigned long lastWarning = 0;
@@ -402,7 +435,9 @@ void readAndFilterECG()
     // - notch 50Hz để triệt nhiễu điện lưới
     // - hrInputSignal: lọc nhẹ riêng cho detector
     // - filteredSignal: làm mượt thích nghi cho hiển thị
-    float conditioned = applyMedianFilter(rawSignal);
+    // Dùng MA trước median để giảm nhiễu rời rạc và hạn chế peak giả
+    float ma = applyMovingAverage(rawSignal);
+    float conditioned = applyMedianFilter(ma);
     float notch = applyNotch50Hz(conditioned);
     float ac = applyHighPassFilter(notch);
     hrInputSignal = applyHeartRateLPF(ac);
@@ -435,34 +470,41 @@ void detectHeartRate()
     {
         heartRate = 0;
         rrCount = 0;
+        rrIndex = 0;
+        derivBaseline = 0;
+        hrFirstValidMs = 0;
+        hrPrevAbs1 = 0;
+        hrPrevAbs2 = 0;
+        hrInstantBpmLp = 0;
+        hrInstantInit = false;
+        lastRPeakTime = 0;
         return;
     }
 
     unsigned long now = millis();
-    static unsigned long firstValidMs = 0;
-    static float prev2 = 0;
-    static float prev1 = 0;
+    float absCurr = fabsf(hrInputSignal);
 
-    if (firstValidMs == 0)
-        firstValidMs = now;
-    if (now - firstValidMs < HR_STARTUP_BLANK_MS)
+    if (hrFirstValidMs == 0)
+        hrFirstValidMs = now;
+    if (now - hrFirstValidMs < HR_STARTUP_BLANK_MS)
     {
         heartRate = 0;
-        prev2 = prev1;
-        prev1 = hrInputSignal;
+        hrPrevAbs2 = hrPrevAbs1;
+        hrPrevAbs1 = absCurr;
         return;
     }
 
-    float absPrev = fabsf(prev1);
-    derivBaseline = derivBaseline * 0.995f + absPrev * 0.005f;
-    float threshold = derivBaseline * 2.8f;
-    if (threshold < 18.0f)
-        threshold = 18.0f;
+    derivBaseline = derivBaseline * 0.996f + absCurr * 0.004f;
+    float threshold = derivBaseline * 2.4f;
+    if (threshold < 16.0f)
+        threshold = 16.0f;
 
-    bool localPeak = (prev1 > prev2) && (prev1 > hrInputSignal);
+    bool localPeak = (hrPrevAbs1 > hrPrevAbs2) && (hrPrevAbs1 > absCurr);
+    float prominence = hrPrevAbs1 - fminf(hrPrevAbs2, absCurr);
+    bool prominenceOk = prominence > 7.0f;
     bool timeOk = (lastRPeakTime == 0) || (now - lastRPeakTime >= HR_REFRACTORY_MS);
 
-    if (localPeak && absPrev > threshold && timeOk)
+    if (localPeak && prominenceOk && hrPrevAbs1 > threshold && timeOk)
     {
         unsigned long rrInterval = (lastRPeakTime == 0) ? 0 : (now - lastRPeakTime);
         lastRPeakTime = now;
@@ -470,31 +512,77 @@ void detectHeartRate()
 
         if (rrInterval >= (60000UL / HR_MAX_BPM) && rrInterval <= (60000UL / HR_MIN_BPM))
         {
+            float instBpm = 60000.0f / (float)rrInterval;
+            if (!hrInstantInit)
+            {
+                hrInstantBpmLp = instBpm;
+                hrInstantInit = true;
+            }
+            else
+            {
+                hrInstantBpmLp = HR_BPM_LP_ALPHA * hrInstantBpmLp + (1.0f - HR_BPM_LP_ALPHA) * instBpm;
+            }
+
+            if (rrCount >= 3)
+            {
+                float avgRRForGate = 0;
+                for (int i = 0; i < rrCount; i++)
+                    avgRRForGate += rrIntervals[i];
+                avgRRForGate /= rrCount;
+
+                float minGate = avgRRForGate * 0.70f;
+                float maxGate = avgRRForGate * 1.45f;
+                if (rrInterval < minGate || rrInterval > maxGate)
+                {
+                    hrPrevAbs2 = hrPrevAbs1;
+                    hrPrevAbs1 = absCurr;
+                    return;
+                }
+            }
+
             rrIntervals[rrIndex] = (float)rrInterval;
             rrIndex = (rrIndex + 1) % HR_RR_BUFFER;
             if (rrCount < HR_RR_BUFFER)
                 rrCount++;
 
-            float avgRR = 0;
-            for (int i = 0; i < rrCount; i++)
-                avgRR += rrIntervals[i];
-            avgRR /= rrCount;
+            if (rrCount < 3)
+            {
+                int bpmEarly = (int)(hrInstantBpmLp + 0.5f);
+                heartRate = (bpmEarly >= HR_MIN_BPM && bpmEarly <= HR_MAX_BPM) ? bpmEarly : 0;
+            }
+            else
+            {
+                float avgRR = 0;
+                for (int i = 0; i < rrCount; i++)
+                    avgRR += rrIntervals[i];
+                avgRR /= rrCount;
 
-            int bpm = (int)(60000.0f / avgRR);
-            heartRate = (bpm >= HR_MIN_BPM && bpm <= HR_MAX_BPM) ? bpm : 0;
+                int bpm = (int)((0.70f * (60000.0f / avgRR) + 0.30f * hrInstantBpmLp) + 0.5f);
+                heartRate = (bpm >= HR_MIN_BPM && bpm <= HR_MAX_BPM) ? bpm : 0;
+            }
         }
     }
 
-    prev2 = prev1;
-    prev1 = hrInputSignal;
+    hrPrevAbs2 = hrPrevAbs1;
+    hrPrevAbs1 = absCurr;
 
-    // Timeout: không có nhịp trong 3 giây
-    if (now - lastRPeakTime > 3000)
+    // Timeout: không có nhịp đủ lâu thì reset detector
+    if (now - lastRPeakTime > HR_TIMEOUT_MS)
     {
         heartRate = 0;
         rrCount = 0;
+        rrIndex = 0;
         derivBaseline = 0;
+        hrFirstValidMs = now;
+        hrInstantBpmLp = 0;
+        hrInstantInit = false;
     }
+}
+
+void sampleAD8232Now()
+{
+    readAndFilterECG();
+    detectHeartRate();
 }
 
 // ==========================================
@@ -511,12 +599,7 @@ void updateAD8232()
     if (currentTime - lastSampleTime >= sampleInterval)
     {
         lastSampleTime = currentTime;
-
-        // Đọc và lọc tín hiệu
-        readAndFilterECG();
-
-        // Phát hiện nhịp tim
-        detectHeartRate();
+        sampleAD8232Now();
     }
 }
 
@@ -541,6 +624,11 @@ int getHeartRate()
 bool areLeadsConnected()
 {
     return leadsConnected;
+}
+
+bool isAD8232Available()
+{
+    return adsAvailable;
 }
 
 // ==========================================

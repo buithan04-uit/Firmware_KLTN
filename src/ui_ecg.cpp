@@ -35,7 +35,8 @@ static lv_obj_t *lbl_status = nullptr;
 static lv_obj_t *lbl_warning = nullptr;
 static lv_obj_t *lbl_heart = nullptr; // Beat indicator dot
 
-static uint32_t current_color = 0x00E676; // Green
+static uint32_t current_color = 0x00E676;               // Green
+static constexpr uint32_t CHART_UPDATE_INTERVAL_MS = 8; // 125Hz chart update (sync với UI feed)
 
 // ==========================================
 // STYLES
@@ -203,13 +204,13 @@ static void build_ecg_screen()
     chart_ecg = lv_chart_create(chart_container);
     lv_obj_set_size(chart_ecg, 320, 165);
     lv_chart_set_type(chart_ecg, LV_CHART_TYPE_LINE);
-    lv_chart_set_point_count(chart_ecg, 80); // 80 points = 1.6s tại 50Hz, đỉnh tách xa để dễ đọc
+    lv_chart_set_point_count(chart_ecg, 160); // 1.28s cửa sổ tại 125Hz, dày điểm hơn để giảm răng cưa
     lv_chart_set_range(chart_ecg, LV_CHART_AXIS_PRIMARY_Y, 0, 200);
     lv_chart_set_update_mode(chart_ecg, LV_CHART_UPDATE_MODE_CIRCULAR); // Sweep mode
     lv_obj_add_style(chart_ecg, &style_chart, 0);
     lv_obj_set_style_size(chart_ecg, 0, LV_PART_INDICATOR);
-    lv_obj_set_style_line_width(chart_ecg, 2, LV_PART_ITEMS); // Line thickness
-    lv_chart_set_div_line_count(chart_ecg, 5, 12);
+    lv_obj_set_style_line_width(chart_ecg, 1, LV_PART_ITEMS);
+    lv_chart_set_div_line_count(chart_ecg, 5, 14);
 
     // Add ECG series
     ser_ecg = lv_chart_add_series(chart_ecg, lv_color_hex(current_color), LV_CHART_AXIS_PRIMARY_Y);
@@ -255,7 +256,7 @@ static void build_ecg_screen()
 
     // Lead + Speed info (right side)
     lv_obj_t *lbl_info = lv_label_create(bottom_bar);
-    lv_label_set_text(lbl_info, "II  50mm/s");
+    lv_label_set_text(lbl_info, "II  25mm/s");
     lv_obj_set_style_text_color(lbl_info, lv_color_hex(0x555555), 0);
     lv_obj_set_style_text_font(lbl_info, &lv_font_montserrat_12, 0);
     lv_obj_align(lbl_info, LV_ALIGN_RIGHT_MID, -10, 0);
@@ -317,9 +318,19 @@ void ecg_ui_update(float ecg_mV, int hr_bpm, bool leads_connected)
     if (!chart_ecg || !ser_ecg)
         return;
 
+    // State cho render ổn định hình dạng ECG
+    static unsigned long lastChartUpdate = 0;
+    static float displayBaseline = 0.0f;
+    static float displayFiltered = 0.0f;
+    static float envelope = 130.0f;
+    static float yScale = 230.0f;
+    static bool needsReprime = true;
+
     // Check lead connection
     if (!leads_connected)
     {
+        needsReprime = true;
+
         // Show warning
         if (lbl_warning)
         {
@@ -345,50 +356,67 @@ void ecg_ui_update(float ecg_mV, int hr_bpm, bool leads_connected)
     if (lbl_warning)
         lv_obj_add_flag(lbl_warning, LV_OBJ_FLAG_HIDDEN);
 
-    // ========== CHART UPDATE (time-based 50Hz) ==========
-    // Downsample thông minh: trung bình cửa sổ + một phần peak để giữ R-wave
-    static float windowPeak = 0;
-    static float windowSum = 0;
-    static int windowCount = 0;
-    static bool windowHasData = false;
-    static unsigned long lastChartUpdate = 0;
-
-    // Track peak (giữ R-waves không bị mất)
-    if (!windowHasData || fabsf(ecg_mV) > fabsf(windowPeak))
+    if (needsReprime)
     {
-        windowPeak = ecg_mV;
-        windowHasData = true;
+        displayBaseline = ecg_mV;
+        displayFiltered = 0.0f;
+        envelope = 130.0f;
+        yScale = 230.0f;
+        lastChartUpdate = millis();
+        needsReprime = false;
     }
-    windowSum += ecg_mV;
-    windowCount++;
 
-    if (millis() - lastChartUpdate >= 20) // 50Hz chart update
+    if (millis() - lastChartUpdate >= CHART_UPDATE_INTERVAL_MS)
     {
         lastChartUpdate = millis();
 
-        float windowAvg = (windowCount > 0) ? (windowSum / windowCount) : 0.0f;
-        float displayValue = 0.75f * windowAvg + 0.25f * windowPeak;
+        // Baseline tracking có chặn biên để đỉnh R không kéo lệch tâm đồ thị
+        float baselineInput = constrain(ecg_mV, -90.0f, 90.0f);
+        displayBaseline = 0.992f * displayBaseline + 0.008f * baselineInput;
+        float centered = ecg_mV - displayBaseline;
 
-        // Fixed clinical-like scale để hình dạng ổn định, không co giãn giả
-        const float yScale = 320.0f;
+        // Lọc hiển thị nhẹ để mượt nhưng vẫn giữ biên dạng P-QRS-T
+        float delta = fabsf(centered - displayFiltered);
+        float smoothAlpha = (delta > 40.0f) ? 0.28f : 0.58f;
+        displayFiltered = smoothAlpha * displayFiltered + (1.0f - smoothAlpha) * centered;
 
-        // Normalize: ±yScale → 0-200 chart units
-        int ecg_chart = (int)((displayValue / yScale + 1.0f) * 100.0f);
+        float absDisplay = fabsf(displayFiltered);
+        if (absDisplay > envelope)
+            envelope = 0.20f * absDisplay + 0.80f * envelope;
+        else
+            envelope = 0.005f * absDisplay + 0.995f * envelope;
+
+        envelope = constrain(envelope, 95.0f, 320.0f);
+
+        float targetScale = envelope * 1.90f;
+        if (targetScale < 230.0f)
+            targetScale = 230.0f;
+        yScale = 0.97f * yScale + 0.03f * targetScale;
+        yScale = constrain(yScale, 210.0f, 430.0f);
+
+        float limited = constrain(displayFiltered, -0.95f * yScale, 0.95f * yScale);
+
+        int ecg_chart = (int)((limited / yScale + 1.0f) * 100.0f);
         ecg_chart = constrain(ecg_chart, 0, 200);
 
         lv_chart_set_next_value(chart_ecg, ser_ecg, ecg_chart);
-
-        windowPeak = 0;
-        windowSum = 0;
-        windowCount = 0;
-        windowHasData = false;
     }
 
     // ========== HEART RATE DISPLAY ==========
+    static int lastValidHr = 0;
+    static unsigned long lastValidHrMs = 0;
     if (lbl_hr_value)
     {
         if (hr_bpm > 30 && hr_bpm < 220)
+        {
+            lastValidHr = hr_bpm;
+            lastValidHrMs = millis();
             lv_label_set_text_fmt(lbl_hr_value, "%d", hr_bpm);
+        }
+        else if (lastValidHr > 0 && (millis() - lastValidHrMs) < 3500)
+        {
+            lv_label_set_text_fmt(lbl_hr_value, "%d", lastValidHr);
+        }
         else
             lv_label_set_text(lbl_hr_value, "--");
     }
@@ -423,7 +451,7 @@ void ecg_ui_reset_chart()
         return;
 
     // Clear all points
-    lv_chart_set_all_value(chart_ecg, ser_ecg, 50); // Baseline at 50
+    lv_chart_set_all_value(chart_ecg, ser_ecg, 100); // Baseline at center
     Serial.println("[ECG_UI] Chart reset");
 }
 

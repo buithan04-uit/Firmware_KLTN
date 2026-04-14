@@ -36,6 +36,8 @@
 // INCLUDES
 // ==========================================
 #include <Arduino.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "ad8232.h"
 
 #if defined(ECG_MODE_LCD_DISPLAY) || defined(ECG_MODE_DUAL)
@@ -58,7 +60,12 @@ TFT_eSPI tft = TFT_eSPI();
 
 #if defined(ECG_MODE_LCD_DISPLAY) || defined(ECG_MODE_DUAL)
 #define LVGL_TICK_INTERVAL 5 // LVGL handler 200Hz
+#define UI_UPDATE_INTERVAL 8 // UI data update 125Hz (chart đồng bộ 125Hz)
 #endif
+
+#define ECG_TASK_STACK_SIZE 4096
+#define ECG_TASK_PRIORITY 4
+#define ECG_TASK_CORE 0
 
 // ==========================================
 // GLOBAL VARIABLES
@@ -66,9 +73,45 @@ TFT_eSPI tft = TFT_eSPI();
 unsigned long lastECGUpdate = 0;
 unsigned long lastDebugTime = 0;
 
+TaskHandle_t ecgTaskHandle = nullptr;
+portMUX_TYPE ecgDataMux = portMUX_INITIALIZER_UNLOCKED;
+volatile float latestRaw = 0.0f;
+volatile float latestFiltered = 0.0f;
+volatile int latestHR = 0;
+volatile bool latestLeadsOK = false;
+volatile bool latestDataReady = false;
+
 #if defined(ECG_MODE_LCD_DISPLAY) || defined(ECG_MODE_DUAL)
 unsigned long lastLVGLTick = 0;
+unsigned long lastUIUpdate = 0;
 #endif
+
+void ecgAcquisitionTask(void *parameter)
+{
+  TickType_t lastWakeTime = xTaskGetTickCount();
+  const TickType_t taskPeriod = pdMS_TO_TICKS(ECG_UPDATE_INTERVAL);
+
+  while (true)
+  {
+    // Task lấy mẫu riêng giúp giữ chu kỳ đọc/lọc ổn định, không bị UI block
+    sampleAD8232Now();
+
+    float raw = getECGRawSignal();
+    float filtered = getECGFilteredSignal();
+    int hr = getHeartRate();
+    bool leadsOK = areLeadsConnected();
+
+    portENTER_CRITICAL(&ecgDataMux);
+    latestRaw = raw;
+    latestFiltered = filtered;
+    latestHR = hr;
+    latestLeadsOK = leadsOK;
+    latestDataReady = true;
+    portEXIT_CRITICAL(&ecgDataMux);
+
+    vTaskDelayUntil(&lastWakeTime, taskPeriod);
+  }
+}
 
 // ==========================================
 // SETUP
@@ -128,7 +171,33 @@ void setup()
   // ========== INITIALIZE AD8232 ==========
   Serial.println("💓 Initializing AD8232...");
   initAD8232();
-  Serial.println("✓ AD8232 ready");
+  if (isAD8232Available())
+  {
+    Serial.println("✓ AD8232 ready");
+  }
+  else
+  {
+    Serial.println("⚠️  AD8232 not available, running display-only mode");
+  }
+  Serial.println();
+
+  BaseType_t taskCreated = xTaskCreatePinnedToCore(
+      ecgAcquisitionTask,
+      "ECG_Acquire",
+      ECG_TASK_STACK_SIZE,
+      NULL,
+      ECG_TASK_PRIORITY,
+      &ecgTaskHandle,
+      ECG_TASK_CORE);
+
+  if (taskCreated == pdPASS)
+  {
+    Serial.println("✓ ECG acquisition task started on Core 0 @ 250Hz");
+  }
+  else
+  {
+    Serial.println("⚠️  Failed to create ECG acquisition task");
+  }
   Serial.println();
 
   // ========== READY MESSAGE ==========
@@ -147,22 +216,38 @@ void setup()
 // ==========================================
 void loop()
 {
-  // -----------------------------------------------
-  // 1. UPDATE AD8232 (250Hz internal timing)
-  // -----------------------------------------------
-  updateAD8232();
+  unsigned long now = millis();
 
-  // Get latest ECG data
-  float raw = getECGRawSignal();
-  float filtered = getECGFilteredSignal();
-  int hr = getHeartRate();
-  bool leadsOK = areLeadsConnected();
+  // Lấy snapshot dữ liệu mới nhất từ task Core 0
+  float raw = 0.0f;
+  float filtered = 0.0f;
+  int hr = 0;
+  bool leadsOK = false;
+  bool dataReady = false;
+
+  portENTER_CRITICAL(&ecgDataMux);
+  raw = latestRaw;
+  filtered = latestFiltered;
+  hr = latestHR;
+  leadsOK = latestLeadsOK;
+  dataReady = latestDataReady;
+  portEXIT_CRITICAL(&ecgDataMux);
+
+  if (!dataReady)
+  {
+    delay(1);
+    return;
+  }
 
   // -----------------------------------------------
   // 2. LCD UI UPDATE - every iteration (UI downsamples internally)
   // -----------------------------------------------
 #if defined(ECG_MODE_LCD_DISPLAY) || defined(ECG_MODE_DUAL)
-  ecg_ui_update(filtered, hr, leadsOK);
+  if (now - lastUIUpdate >= UI_UPDATE_INTERVAL)
+  {
+    lastUIUpdate = now;
+    ecg_ui_update(filtered, hr, leadsOK);
+  }
 #endif
 
   // -----------------------------------------------
@@ -179,9 +264,9 @@ void loop()
     filteredPeak = filtered;
   windowHasData = true;
 
-  if (millis() - lastECGUpdate >= SERIAL_OUTPUT_INTERVAL)
+  if (now - lastECGUpdate >= SERIAL_OUTPUT_INTERVAL)
   {
-    lastECGUpdate = millis();
+    lastECGUpdate = now;
 
     if (!leadsOK)
     {
@@ -207,8 +292,15 @@ void loop()
   // 4. LVGL HANDLER (LCD/Dual mode)
   // -----------------------------------------------
 #if defined(ECG_MODE_LCD_DISPLAY) || defined(ECG_MODE_DUAL)
-  ecg_ui_tick();
+  if (now - lastLVGLTick >= LVGL_TICK_INTERVAL)
+  {
+    lastLVGLTick = now;
+    ecg_ui_tick();
+  }
 #endif
+
+  // Nhường CPU để tránh nghẽn UI/Serial khi loop chạy quá nhanh
+  delay(1);
 }
 
 /*

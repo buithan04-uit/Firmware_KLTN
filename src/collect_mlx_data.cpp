@@ -83,6 +83,14 @@ bool isMeasuring = false;
 // ==========================================
 #define MEASUREMENT_SAMPLES 30
 
+// Sample quality gates for fast/consistent measurement
+#define DIST_MIN_MM 20.0f
+#define DIST_MAX_MM 30.0f
+#define AMBIENT_MIN_C 20.0f
+#define AMBIENT_MAX_C 35.0f
+#define BODY_SENSOR_MIN_C 32.0f
+#define BODY_SENSOR_MAX_C 42.0f
+
 // ============================================================
 // 1. MEDIAN FILTER 3 MẪU (Chống spike, không gây trễ)
 // ============================================================
@@ -180,6 +188,33 @@ float interpolateCalibration(float raw)
 #define EMA_FAST_THRESHOLD 15.0f // Ngưỡng "di chuyển nhanh"
 static float emaValue = 0;
 static bool emaInit = false;
+
+static bool isDistanceValid(float distMM)
+{
+    return distMM >= DIST_MIN_MM && distMM <= DIST_MAX_MM;
+}
+
+static bool isTemperatureValid(float objTempC, float ambTempC)
+{
+    if (!isfinite(objTempC) || !isfinite(ambTempC))
+        return false;
+    if (ambTempC < AMBIENT_MIN_C || ambTempC > AMBIENT_MAX_C)
+        return false;
+    return objTempC >= BODY_SENSOR_MIN_C && objTempC <= BODY_SENSOR_MAX_C;
+}
+
+static float meanValue(const float *data, int n)
+{
+    if (n <= 0)
+        return 0.0f;
+
+    float sum = 0.0f;
+    for (int i = 0; i < n; i++)
+    {
+        sum += data[i];
+    }
+    return sum / n;
+}
 
 float emaFilter(float newVal)
 {
@@ -315,17 +350,17 @@ void ui_event_take_measurement(lv_event_t *e)
 
     // Show popup
     char sampMsg[32];
-    snprintf(sampMsg, sizeof(sampMsg), "Lay %d mau...", MEASUREMENT_SAMPLES);
+    snprintf(sampMsg, sizeof(sampMsg), "Lay %d mau dat chuan...", MEASUREMENT_SAMPLES);
     ui_datacollector_show_popup("DANG LAY MAU", sampMsg,
                                 lv_palette_main(LV_PALETTE_BLUE), true);
 
-    // Thu thập từng mẫu riêng lẻ để xử lý thống kê
+    // Thu thap 30 mau hop le LIEN TIEP; sai 1 mau se reset ve 0
     float distSamples[MEASUREMENT_SAMPLES];
     float objSamples[MEASUREMENT_SAMPLES];
     float ambSamples[MEASUREMENT_SAMPLES];
     int count = 0;
 
-    for (int j = 0; j < MEASUREMENT_SAMPLES; j++)
+    while (count < MEASUREMENT_SAMPLES)
     {
         VL53L0X_RangingMeasurementData_t measure;
         lox.rangingTest(&measure, false);
@@ -336,24 +371,40 @@ void ui_event_take_measurement(lv_event_t *e)
         }
         else
         {
-            distSamples[count] = getCorrectedDistance(measure.RangeMilliMeter);
-            objSamples[count] = mlx.readObjectTempC();
-            ambSamples[count] = mlx.readAmbientTempC();
-            count++;
+            float correctedDist = getCorrectedDistance((float)measure.RangeMilliMeter);
+            float objTemp = mlx.readObjectTempC();
+            float ambTemp = mlx.readAmbientTempC();
+
+            if (isDistanceValid(correctedDist) && isTemperatureValid(objTemp, ambTemp))
+            {
+                distSamples[count] = correctedDist;
+                objSamples[count] = objTemp;
+                ambSamples[count] = ambTemp;
+                count++;
+            }
+            else
+            {
+                if (count > 0)
+                {
+                    Serial.printf("[RESET] Mau khong hop le, reset chuoi 30 mau (dist=%.1f, obj=%.1f, amb=%.1f)\n",
+                                  correctedDist, objTemp, ambTemp);
+                }
+                count = 0;
+            }
         }
 
-        // Update progress
-        ui_datacollector_update_popup_progress((j + 1) * 100 / MEASUREMENT_SAMPLES);
+        // Progress based on valid samples only
+        ui_datacollector_update_popup_progress((count * 100) / MEASUREMENT_SAMPLES);
         lv_task_handler();
-        delay(50);
+        delay(20);
     }
 
-    if (count > 0)
+    if (count == MEASUREMENT_SAMPLES)
     {
-        // Robust statistics: IQR outlier rejection + trimmed mean
-        float avgD = robustMean(distSamples, count);
-        float avgO = robustMean(objSamples, count);
-        float avgA = robustMean(ambSamples, count);
+        // Xu ly 30 mau lien tiep bang trung binh cong
+        float avgD = meanValue(distSamples, count);
+        float avgO = meanValue(objSamples, count);
+        float avgA = meanValue(ambSamples, count);
 
         Serial.printf("[STAT] %d/%d valid samples. Dist=%.1f Obj=%.1f Amb=%.1f\n",
                       count, MEASUREMENT_SAMPLES, avgD, avgO, avgA);
@@ -364,7 +415,7 @@ void ui_event_take_measurement(lv_event_t *e)
         ui_datacollector_show_popup("KET QUA DO", msg,
                                     lv_palette_main(LV_PALETTE_GREEN), false);
         lv_task_handler();
-        delay(1500);
+        delay(500);
 
         // Send to Google Sheets
         ui_datacollector_show_popup("GUI DU LIEU", "Dang gui cloud...",
@@ -382,6 +433,8 @@ void ui_event_take_measurement(lv_event_t *e)
 
             http.begin(url.c_str());
             http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+            http.setConnectTimeout(2000);
+            http.setTimeout(3000);
             int httpCode = http.GET();
             http.end();
 
@@ -404,13 +457,8 @@ void ui_event_take_measurement(lv_event_t *e)
                                         lv_palette_main(LV_PALETTE_RED), false);
         }
     }
-    else
-    {
-        ui_datacollector_show_popup("LOI CAM BIEN", "Khong doc duoc!",
-                                    lv_palette_main(LV_PALETTE_RED), false);
-    }
 
-    delay(2000);
+    delay(700);
     ui_datacollector_hide_popup();
     isMeasuring = false;
 }

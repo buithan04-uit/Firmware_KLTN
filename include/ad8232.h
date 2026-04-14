@@ -25,6 +25,12 @@ void initAD8232();
  */
 void updateAD8232();
 
+/**
+ * Lấy 1 mẫu ECG ngay lập tức (đọc ADC + lọc + detect nhịp)
+ * Dùng cho kiến trúc task riêng chạy chu kỳ cố định
+ */
+void sampleAD8232Now();
+
 // ==========================================
 // HÀM LẤY DỮ LIỆU
 // ==========================================
@@ -52,6 +58,12 @@ int getHeartRate();
  * @return true nếu điện cực được gắn đúng, false nếu bị tuột
  */
 bool areLeadsConnected();
+
+/**
+ * Kiểm tra trạng thái ADS1115
+ * @return true nếu ADS1115 đã khởi tạo thành công
+ */
+bool isAD8232Available();
 
 // ==========================================
 // HÀM DEBUG (TÙY CHỌN)
