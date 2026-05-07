@@ -767,6 +767,9 @@
 /*Stress test for LVGL*/
 #define LV_USE_DEMO_STRESS 0
 
+/*Show the data on a screen with a lot of animations*/
+#define LV_FONT_MONTSERRAT_14  1
+
 /*Music player demo*/
 #define LV_USE_DEMO_MUSIC 0
 #if LV_USE_DEMO_MUSIC

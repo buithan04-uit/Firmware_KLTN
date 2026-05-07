@@ -20,6 +20,8 @@ extern "C"
     extern lv_obj_t *ui_HeaderPanel;
     extern lv_obj_t *ui_TitleLabel;
     extern lv_obj_t *ui_WiFiIcon;
+    extern lv_obj_t *ui_WiFiSignal;
+    extern lv_obj_t *ui_WiFiSsid;
 
     // Info panels
     extern lv_obj_t *ui_IDPanel;
@@ -94,6 +96,14 @@ extern "C"
     void ui_datacollector_update_wifi(bool connected);
 
     /**
+     * @brief Update WiFi status details (signal + SSID)
+     * @param signalLevel Signal text (e.g., "3/4", "AP")
+     * @param ssid SSID or status text
+     * @param colorHex Text/icon color (hex)
+     */
+    void ui_datacollector_update_wifi_detail(const char *signalLevel, const char *ssid, uint32_t colorHex);
+
+    /**
      * @brief Show popup with message
      * @param title Popup title
      * @param message Popup message
@@ -117,6 +127,11 @@ extern "C"
      * @brief Switch to Monitor screen
      */
     void ui_datacollector_load_monitor(void);
+
+    /**
+     * @brief Cleanup Collect screen resources
+     */
+    void ui_datacollector_cleanup(void);
 
     // ==========================================
     // EVENT CALLBACKS (to be implemented in main.cpp)

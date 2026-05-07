@@ -136,6 +136,62 @@ const char html_page[] PROGMEM = R"=====(
         }
         @keyframes spin { to { transform: rotate(360deg); } }
 
+        .toggle-box {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin: 8px 0 14px;
+            padding: 10px 12px;
+            background: #F7FBFA;
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            font-size: 13px;
+            color: var(--text-sec);
+        }
+
+        .toggle-box input[type="checkbox"] {
+            width: 18px;
+            height: 18px;
+            accent-color: var(--primary);
+            padding: 0;
+            margin: 0;
+            border: none;
+            box-shadow: none;
+            background: transparent;
+            appearance: auto;
+        }
+
+        .mqtt-row {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+        }
+
+        .mqtt-row .input-wrapper {
+            margin-bottom: 0;
+            flex: 1;
+        }
+
+        .mqtt-actions {
+            display: flex;
+            justify-content: flex-end;
+            margin-bottom: 10px;
+        }
+
+        .btn-mini {
+            flex: 0 0 auto;
+            padding: 10px 12px;
+            font-size: 12px;
+            border-radius: 10px;
+            background: #E9F7F5;
+            color: var(--primary-dark);
+        }
+
+        .is-disabled {
+            opacity: 0.55;
+            pointer-events: none;
+        }
+
     </style>
 </head>
 <body>
@@ -172,6 +228,24 @@ const char html_page[] PROGMEM = R"=====(
         </div>
 
         <span class="section-label">Máy chủ MQTT</span>
+        <div class="toggle-box">
+            <input type="checkbox" id="mqtt_use_custom" onchange="toggleMqttCustom()">
+            <label for="mqtt_use_custom">Thay đổi cấu hình MQTT mặc định</label>
+        </div>
+        <div class="mqtt-actions">
+            <button type="button" class="btn-mini" onclick="fillDefaultMqtt()">Mặc định MQTT</button>
+        </div>
+        <div id="mqtt_custom_fields">
+            <div class="mqtt-row">
+                <div class="input-wrapper">
+                    <svg class="input-icon" viewBox="0 0 24 24"><path d="M12 3C7.03 3 3 7.03 3 12s4.03 9 9 9 9-4.03 9-9-4.03-9-9-9zm0 2c2.21 0 4 1.79 4 4s-1.79 4-4 4-4-1.79-4-4 1.79-4 4-4zm0 14c-2.67 0-5.03-1.34-6.47-3.38.03-2.14 4.31-3.32 6.47-3.32 2.15 0 6.44 1.18 6.47 3.32C17.03 17.66 14.67 19 12 19z"/></svg>
+                    <input type="text" id="mqtt_host" placeholder="MQTT Host (VD: 192.168.1.4)">
+                </div>
+                <div class="input-wrapper">
+                    <svg class="input-icon" viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-2 13H7v-2h10v2zm0-4H7v-2h10v2zm0-4H7V6h10v2z"/></svg>
+                    <input type="number" id="mqtt_port" min="1" max="65535" placeholder="Port">
+                </div>
+            </div>
         <div class="input-wrapper">
             <svg class="input-icon" viewBox="0 0 24 24"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>
             <input type="text" id="mqtt_user" placeholder="MQTT Username">
@@ -180,6 +254,7 @@ const char html_page[] PROGMEM = R"=====(
             <svg class="input-icon" viewBox="0 0 24 24"><path d="M12.65 10C11.83 7.67 9.61 6 7 6c-3.31 0-6 2.69-6 6s2.69 6 6 6c2.61 0 4.83-1.67 5.65-4H17v4h4v-4h2v-4H12.65zM7 14c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2z"/></svg>
             <input type="password" id="mqtt_pass" placeholder="MQTT Password">
             <svg class="pass-toggle" onclick="togglePass('mqtt_pass')" viewBox="0 0 24 24"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
+        </div>
         </div>
 
         <div class="btn-group">
@@ -192,6 +267,7 @@ const char html_page[] PROGMEM = R"=====(
     </div>
 
     <script>
+        var mqttDefaults = { host: '', port: 1883, user: '', pass: '' };
         window.onload = function() { setTimeout(() => { scanWifi(); loadConfig(); }, 500); };
 
         function showToast(msg, type) {
@@ -228,11 +304,35 @@ const char html_page[] PROGMEM = R"=====(
             }).catch(e=>s.innerHTML="<option>Lỗi quét</option>");
         }
 
+        function toggleMqttCustom() {
+            var custom = document.getElementById('mqtt_use_custom').checked;
+            var box = document.getElementById('mqtt_custom_fields');
+            if(custom) box.classList.remove('is-disabled');
+            else box.classList.add('is-disabled');
+        }
+
+        function fillDefaultMqtt() {
+            if(mqttDefaults.host) document.getElementById('mqtt_host').value = mqttDefaults.host;
+            if(mqttDefaults.port) document.getElementById('mqtt_port').value = mqttDefaults.port;
+            if(mqttDefaults.user) document.getElementById('mqtt_user').value = mqttDefaults.user;
+            if(mqttDefaults.pass) document.getElementById('mqtt_pass').value = mqttDefaults.pass;
+            showToast('Đã điền cấu hình MQTT mặc định', 'success');
+        }
+
         function loadConfig() {
             fetch('/config').then(r=>r.json()).then(d=>{
                 if(d.email) document.getElementById('email').value = d.email;
+                if(d.mqtt_default_host) mqttDefaults.host = d.mqtt_default_host;
+                if(d.mqtt_default_port) mqttDefaults.port = d.mqtt_default_port;
+                if(d.mqtt_default_user) mqttDefaults.user = d.mqtt_default_user;
+                if(d.mqtt_default_pass) mqttDefaults.pass = d.mqtt_default_pass;
+
+                document.getElementById('mqtt_use_custom').checked = d.mqtt_use_custom ? true : false;
+                if(d.mqtt_host) document.getElementById('mqtt_host').value = d.mqtt_host;
+                if(d.mqtt_port) document.getElementById('mqtt_port').value = d.mqtt_port;
                 if(d.mqtt_user) document.getElementById('mqtt_user').value = d.mqtt_user;
                 if(d.mqtt_pass) document.getElementById('mqtt_pass').value = d.mqtt_pass;
+                toggleMqttCustom();
             });
         }
 
@@ -252,6 +352,9 @@ const char html_page[] PROGMEM = R"=====(
                 ssid: ssid,
                 pass: document.getElementById('pass').value,
                 email: email,
+                mqtt_use_custom: document.getElementById('mqtt_use_custom').checked ? '1' : '0',
+                mqtt_host: document.getElementById('mqtt_host').value.trim(),
+                mqtt_port: document.getElementById('mqtt_port').value.trim(),
                 mqtt_user: document.getElementById('mqtt_user').value,
                 mqtt_pass: document.getElementById('mqtt_pass').value
             };

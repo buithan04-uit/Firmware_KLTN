@@ -1,0 +1,137 @@
+================================================================
+HƯỚNG DẪN TÍCH HỢP BOOT SCREEN VÀO PROJECT
+================================================================
+
+Files cần thêm vào project:
+  boot_screen.cpp
+  boot_screen.h
+
+================================================================
+BƯỚC 1: Sửa ui.cpp
+================================================================
+
+1a. Thêm include ở đầu file ui.cpp (sau các include hiện có):
+
+    #include "boot_screen.h"
+
+1b. Thêm prototype vào phần "KHAI BÁO PROTOTYPE" (section 3):
+
+    void build_boot();
+
+1c. Tìm hàm ui_switch_screen(), sửa case SCR_BOOT:
+
+    --- TRƯỚC ---
+    case SCR_BOOT:
+        break;
+
+    --- SAU ---
+    case SCR_BOOT:
+        build_boot();
+        break;
+
+================================================================
+BƯỚC 2: Sửa main LCD init để cập nhật boot screen
+================================================================
+
+Trong file main.cpp (hoặc file chứa hàm setup()), tìm phần
+khởi tạo LCD và sửa thành như sau. Thêm #include "boot_screen.h"
+ở đầu file.
+
+    // --- INIT LCD ---
+    tft.init();
+    tft.setRotation(1);
+    ui_init();                           // Tạo boot screen
+
+    // --- INIT AD8232 ---
+    boot_screen_set_progress(10);
+    boot_screen_set_sensor_status(BOOT_SENSOR_AD8232, BOOT_SENSOR_CHECKING);
+    lv_task_handler();                   // Flush UI
+
+    initAD8232();
+    if (isAD8232Available()) {
+        boot_screen_set_sensor_status(BOOT_SENSOR_AD8232, BOOT_SENSOR_OK);
+    } else {
+        boot_screen_set_sensor_status(BOOT_SENSOR_AD8232, BOOT_SENSOR_FAIL);
+    }
+    boot_screen_set_progress(30);
+    lv_task_handler();
+
+    // --- INIT MAX30102 ---
+    boot_screen_set_sensor_status(BOOT_SENSOR_MAX30102, BOOT_SENSOR_CHECKING);
+    lv_task_handler();
+
+    if (sensorRuntime.beginMax30102()) {
+        boot_screen_set_sensor_status(BOOT_SENSOR_MAX30102, BOOT_SENSOR_OK);
+    } else {
+        boot_screen_set_sensor_status(BOOT_SENSOR_MAX30102, BOOT_SENSOR_RETRY);
+    }
+    boot_screen_set_progress(55);
+    lv_task_handler();
+
+    // --- INIT MLX90614 ---
+    boot_screen_set_sensor_status(BOOT_SENSOR_MLX90614, BOOT_SENSOR_CHECKING);
+    lv_task_handler();
+
+    if (sensorRuntime.begin()) {        // mlx90614 init nằm trong begin()
+        boot_screen_set_sensor_status(BOOT_SENSOR_MLX90614, BOOT_SENSOR_OK);
+    } else {
+        boot_screen_set_sensor_status(BOOT_SENSOR_MLX90614, BOOT_SENSOR_RETRY);
+    }
+    boot_screen_set_progress(75);
+    lv_task_handler();
+
+    // --- INIT WiFi ---
+    boot_screen_set_sensor_status(BOOT_SENSOR_WIFI, BOOT_SENSOR_CHECKING);
+    lv_task_handler();
+
+    wifiConfigManager.begin();
+    if (wifiConfigManager.isConnected()) {
+        boot_screen_set_sensor_status(BOOT_SENSOR_WIFI, BOOT_SENSOR_OK);
+    } else {
+        boot_screen_set_sensor_status(BOOT_SENSOR_WIFI, BOOT_SENSOR_OFF);
+    }
+    boot_screen_set_progress(100);
+    lv_task_handler();
+
+    // --- Giữ boot screen 1.5 giây rồi vào menu ---
+    delay(1500);
+    ui_switch_screen(SCR_MENU);
+
+================================================================
+BƯỚC 3: Fonts cần có trong LVGL config
+================================================================
+
+Boot screen dùng 2 fonts. Đảm bảo trong lv_conf.h:
+
+    #define LV_FONT_MONTSERRAT_10  1   // Cho body text / sensor rows
+    #define LV_FONT_MONTSERRAT_14  1   // Cho title BIOMONITOR
+
+(Nếu project đã dùng font 14 ở các screen khác thì đã có sẵn.)
+Font 10 thường không bật mặc định, cần enable thêm.
+
+Nếu không muốn thêm font 10, có thể thay &lv_font_montserrat_10
+bằng &lv_font_montserrat_8 (nếu có) hoặc &lv_font_montserrat_12.
+
+================================================================
+GHI CHÚ THÊM
+================================================================
+
+- lv_task_handler() sau mỗi bước init để LVGL flush lên màn hình
+  ngay lập tức, không cần chờ loop() chạy.
+
+- Thanh progress tự động advance theo từng bước:
+    10%  -> Bắt đầu
+    30%  -> AD8232 xong
+    55%  -> MAX30102 xong
+    75%  -> MLX90614 xong
+    100% -> WiFi xong
+
+- Trạng thái RETRY có nghĩa là sensor không thấy lúc boot,
+  nhưng LcdSensorRuntime sẽ tự retry trong background.
+
+- Màu sắc:
+    OK    -> #00E676 xanh lá
+    RETRY -> #FFB300 vàng
+    FAIL  -> #FF5252 đỏ
+    --    -> xám (WiFi offline)
+================================================================

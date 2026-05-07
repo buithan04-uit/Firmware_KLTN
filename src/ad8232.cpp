@@ -74,7 +74,7 @@
 #define HR_TIMEOUT_MS 4500   // Timeout 4.5s để tránh mất BPM khi tín hiệu yếu ngắn hạn
 #define HR_MIN_BPM 45
 #define HR_MAX_BPM 130
-#define HR_STARTUP_BLANK_MS 1100
+#define HR_STARTUP_BLANK_MS 850
 #define HR_RR_BUFFER 8 // Số R-R intervals để tính trung bình
 #define HR_BPM_LP_ALPHA 0.68f
 
@@ -82,6 +82,7 @@
 // BIẾN TOÀN CỤC
 // ==========================================
 Adafruit_ADS1115 ads; // ADS1115 ADC
+static TwoWire adsI2C(1);
 
 // Bộ đệm bộ lọc
 float movingAvgBuffer[MOVING_AVG_SIZE];
@@ -112,6 +113,7 @@ float rrIntervals[HR_RR_BUFFER];
 int rrIndex = 0;
 int rrCount = 0;
 float derivBaseline = 0;
+float hrEnvelope = 18.0f;
 bool beatDetected = false;
 unsigned long hrFirstValidMs = 0;
 float hrPrevAbs1 = 0;
@@ -133,20 +135,27 @@ bool adsAvailable = false;
 void initAD8232()
 {
     Serial.println("=== Khởi tạo AD8232 với ADS1115 ===");
+    pinMode(LO_PLUS_PIN, INPUT_PULLDOWN);
+    pinMode(LO_MINUS_PIN, INPUT_PULLDOWN);
 
-    // Cấu hình chân lead-off detection
-    pinMode(LO_PLUS_PIN, INPUT);
-    pinMode(LO_MINUS_PIN, INPUT);
+    // 400kHz là tốc độ chuẩn Fast-mode I2C, ADS1115 hỗ trợ tối đa 400kHz
+    Wire1.begin(I2C_SDA, I2C_SCL);
+    Wire1.setClock(400000);
+    delay(50);
 
-    // Khởi tạo I2C tốc độ cao để giảm nghẽn khi chạy kèm UI
-    Wire.begin(I2C_SDA, I2C_SCL);
-    Wire.setClock(400000); // 400kHz Fast Mode
-    Wire.setTimeout(2000); // 2s timeout
+    // Retry 3 lần để đảm bảo ADS1115 kịp khởi động (một số board cần thêm thời gian)
+    bool found = false;
+    for (int attempt = 1; attempt <= 3 && !found; attempt++)
+    {
+        found = ads.begin(0x48, &Wire1);
+        if (!found)
+        {
+            Serial.printf("ADS1115 attempt %d/3 failed, retrying...\n", attempt);
+            delay(50);
+        }
+    }
 
-    delay(100); // Đợi I2C ổn định
-
-    // Khởi tạo ADS1115
-    if (!ads.begin())
+    if (!found)
     {
         Serial.println("ERROR: Không tìm thấy ADS1115!");
         Serial.println("Kiểm tra kết nối I2C:");
@@ -357,11 +366,34 @@ float applyHeartRateLPF(float input)
 // ==========================================
 bool checkLeadsConnected()
 {
-    // Nếu LO+ hoặc LO- = HIGH => dây điện cực bị tuột
-    bool loPlus = digitalRead(LO_PLUS_PIN);
-    bool loMinus = digitalRead(LO_MINUS_PIN);
+    // Debounce lead-off inputs to avoid false disconnect flaps from electrical noise.
+    static uint8_t connectedTicks = 0;
+    static uint8_t disconnectedTicks = 0;
+    static bool stableConnected = false;
 
-    return !(loPlus || loMinus);
+    const bool loPlus = digitalRead(LO_PLUS_PIN);
+    const bool loMinus = digitalRead(LO_MINUS_PIN);
+    const bool instantConnected = !(loPlus || loMinus);
+
+    if (instantConnected)
+    {
+        if (connectedTicks < 5)
+            connectedTicks++;
+        disconnectedTicks = 0;
+    }
+    else
+    {
+        if (disconnectedTicks < 5)
+            disconnectedTicks++;
+        connectedTicks = 0;
+    }
+
+    if (connectedTicks >= 3)
+        stableConnected = true;
+    else if (disconnectedTicks >= 3)
+        stableConnected = false;
+
+    return stableConnected;
 }
 
 // ==========================================
@@ -369,6 +401,13 @@ bool checkLeadsConnected()
 // ==========================================
 void readAndFilterECG()
 {
+    static int16_t lastGoodADCValue = 13200; // ~1650mV baseline at GAIN_ONE
+    static float lastRawMv = 1650.0f;
+    static uint8_t invalidStreak = 0;
+    static uint8_t hardFailStreak = 0;
+    static unsigned long readBackoffUntilMs = 0;
+    static unsigned long lastBusRecoveryAtMs = 0;
+
     if (!adsAvailable)
     {
         leadsConnected = false;
@@ -400,36 +439,73 @@ void readAndFilterECG()
 
         // Cảnh báo (mỗi 2s để tránh spam)
         static unsigned long lastWarning = 0;
-        if (millis() - lastWarning >= 2000)
+        if (millis() - lastWarning >= 5000)
         {
             lastWarning = millis();
-            Serial.println();
-            Serial.println("⚠️  LEADS DISCONNECTED! Kiểm tra:");
-            Serial.println("   - Điện cực dán chặt vào da");
-            Serial.println("   - Điện cực có gel hoặc thấm nước muối");
-            Serial.println("   - Dây OUTPUT nối AD8232 → ADS1115 A0");
+            Serial.println("[ECG] LEADS DISCONNECTED");
         }
         return;
     }
 
-    // Đọc giá trị từ ADS1115 (kênh A0)
-    static int16_t lastGoodADCValue = 0;
+    int16_t adcValue = lastGoodADCValue;
 
-    int16_t adcValue = ads.readADC_SingleEnded(0);
+    // Back off briefly after bursts of invalid reads to avoid flooding Wire errors.
+    if (millis() >= readBackoffUntilMs)
+    {
+        adcValue = ads.readADC_SingleEnded(0);
+    }
 
     // Validate: AD8232 OUTPUT ~1.5V → ADC phải > 0 và < 32767
     // Nếu trả về 0 hoặc 32767 → lỗi I2C/overflow, dùng giá trị tốt cuối cùng
     if (adcValue >= ADC_MIN_VALID && adcValue < ADC_MAX_VALID)
     {
         lastGoodADCValue = adcValue;
+        invalidStreak = 0;
+        hardFailStreak = 0;
     }
     else
     {
         adcValue = lastGoodADCValue; // Dùng giá trị tốt gần nhất
+        if (invalidStreak < 255)
+            invalidStreak++;
+        if (hardFailStreak < 255)
+            hardFailStreak++;
+
+        if (invalidStreak >= 3)
+        {
+            readBackoffUntilMs = millis() + 30;
+            invalidStreak = 0;
+        }
+
+        // Recover ADS bus if errors persist for long bursts.
+        if (hardFailStreak >= 25 && (millis() - lastBusRecoveryAtMs) >= 1200)
+        {
+            lastBusRecoveryAtMs = millis();
+            Wire1.begin(I2C_SDA, I2C_SCL);
+            Wire1.setClock(400000);
+            if (ads.begin(0x48, &Wire1)) // Đổi adsI2C thành Wire1
+            {
+                ads.setGain(GAIN_ONE);
+                ads.setDataRate(RATE_ADS1115_475SPS);
+            }
+            hardFailStreak = 0;
+        }
     }
 
-    // Raw giữ nguyên tuyệt đối để thu thập dữ liệu chính xác từ ADS1115
-    rawSignal = adcValue * ADC_MV_PER_BIT;
+    // Suppress impossible one-sample jumps (typically I2C/ADC glitches).
+    float rawMv = adcValue * ADC_MV_PER_BIT;
+    float rawStep = rawMv - lastRawMv;
+    const float maxRawStepMv = 240.0f;
+    if (rawStep > maxRawStepMv)
+    {
+        rawMv = lastRawMv + maxRawStepMv;
+    }
+    else if (rawStep < -maxRawStepMv)
+    {
+        rawMv = lastRawMv - maxRawStepMv;
+    }
+    lastRawMv = rawMv;
+    rawSignal = rawMv;
 
     // Nhánh lọc thông minh:
     // - notch 50Hz để triệt nhiễu điện lưới
@@ -449,11 +525,11 @@ void readAndFilterECG()
 
     // Soft limiter: tránh clip cứng làm bẹt đỉnh QRS
     float absVal = fabsf(filteredSignal);
-    if (absVal > 700.0f)
+    if (absVal > 340.0f)
     {
-        float compressed = 700.0f + (absVal - 700.0f) * 0.25f;
-        if (compressed > 1100.0f)
-            compressed = 1100.0f;
+        float compressed = 340.0f + (absVal - 340.0f) * 0.18f;
+        if (compressed > 520.0f)
+            compressed = 520.0f;
         filteredSignal = (filteredSignal >= 0.0f) ? compressed : -compressed;
     }
 
@@ -472,6 +548,7 @@ void detectHeartRate()
         rrCount = 0;
         rrIndex = 0;
         derivBaseline = 0;
+        hrEnvelope = 18.0f;
         hrFirstValidMs = 0;
         hrPrevAbs1 = 0;
         hrPrevAbs2 = 0;
@@ -495,13 +572,20 @@ void detectHeartRate()
     }
 
     derivBaseline = derivBaseline * 0.996f + absCurr * 0.004f;
-    float threshold = derivBaseline * 2.4f;
-    if (threshold < 16.0f)
-        threshold = 16.0f;
+    hrEnvelope = hrEnvelope * 0.994f + absCurr * 0.006f;
+
+    float thresholdByDeriv = derivBaseline * 1.75f;
+    float thresholdByEnv = hrEnvelope * 1.55f;
+    float threshold = fmaxf(thresholdByDeriv, thresholdByEnv);
+    if (threshold < 9.0f)
+        threshold = 9.0f;
+    if (threshold > 95.0f)
+        threshold = 95.0f;
 
     bool localPeak = (hrPrevAbs1 > hrPrevAbs2) && (hrPrevAbs1 > absCurr);
     float prominence = hrPrevAbs1 - fminf(hrPrevAbs2, absCurr);
-    bool prominenceOk = prominence > 7.0f;
+    float prominenceGate = fmaxf(4.0f, threshold * 0.20f);
+    bool prominenceOk = prominence > prominenceGate;
     bool timeOk = (lastRPeakTime == 0) || (now - lastRPeakTime >= HR_REFRACTORY_MS);
 
     if (localPeak && prominenceOk && hrPrevAbs1 > threshold && timeOk)
@@ -530,8 +614,8 @@ void detectHeartRate()
                     avgRRForGate += rrIntervals[i];
                 avgRRForGate /= rrCount;
 
-                float minGate = avgRRForGate * 0.70f;
-                float maxGate = avgRRForGate * 1.45f;
+                float minGate = avgRRForGate * 0.58f;
+                float maxGate = avgRRForGate * 1.75f;
                 if (rrInterval < minGate || rrInterval > maxGate)
                 {
                     hrPrevAbs2 = hrPrevAbs1;
@@ -573,6 +657,7 @@ void detectHeartRate()
         rrCount = 0;
         rrIndex = 0;
         derivBaseline = 0;
+        hrEnvelope = 18.0f;
         hrFirstValidMs = now;
         hrInstantBpmLp = 0;
         hrInstantInit = false;
