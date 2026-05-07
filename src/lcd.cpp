@@ -87,55 +87,6 @@ __attribute__((constructor)) static void early_boot_log()
     ets_printf("[ROM] app_start\n");
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// PHẦN 3  —  lcd.cpp  (thêm realtime publish + patch SCR_MEASUREALL block)
-// ─────────────────────────────────────────────────────────────────────────────
-
-// ── Hàm mới: publishMeasureAllRealtime() ─────────────────────────────────
-// Gửi tất cả sensor data hiện tại lên MQTT topic "measure_all_rt".
-// Khác với publishMeasureAllData() (one-shot):
-//   - Gọi định kỳ từ SCR_MEASUREALL loop (mỗi MQTT_PUBLISH_INTERVAL_MS)
-//   - Không cần ENTER, không cần confirm, tự động khi mqttSendEnabled = true
-//   - Payload bao gồm ECG waveform value (số 0-200 scale) để server vẽ graph
-// ─────────────────────────────────────────────────────────────────────────────
-// Forward declaration — defined further below
-static bool ensureMqttConnected(const WifiConfigManager &wifi);
-
-static bool publishMeasureAllRealtime(const WifiConfigManager &wifi,
-                                      float temp, int hr, int spo2,
-                                      int ecgWave, float distMm,
-                                      float ambTemp)
-{
-    if (!ensureMqttConnected(wifi))
-        return false;
-
-    StaticJsonDocument<384> doc;
-    doc["device_id"] = mqttDeviceId;
-    doc["mode"] = "measure_all_rt";
-    doc["ts"] = millis();
-
-    // sensor fields (gửi tất cả, kể cả khi = 0)
-    doc["temp"] = temp;
-    doc["ambient"] = ambTemp;
-    doc["hr"] = hr;
-    doc["spo2"] = spo2;
-    doc["ecg_wave"] = ecgWave; // 0-200 (waveform Y scale)
-    doc["dist_mm"] = distMm;
-
-    char payload[384];
-    size_t payloadLen = serializeJson(doc, payload, sizeof(payload));
-    if (payloadLen == 0 || payloadLen >= sizeof(payload))
-    {
-        Serial.println("[MQTT][MA_RT] Payload encode failed.");
-        return false;
-    }
-
-    bool ok = mqttClient.publish(mqttPublishTopic.c_str(), payload);
-    if (!ok)
-        Serial.println("[MQTT][MA_RT] Publish failed.");
-    return ok;
-}
-
 static String buildDeviceId()
 {
     const uint32_t tail = static_cast<uint32_t>(ESP.getEfuseMac() & 0xFFFFFF);
@@ -959,46 +910,16 @@ static void collect_perform_measurement(const WifiConfigManager &wifi)
 
 static void measure_all_once(const WifiConfigManager &wifi)
 {
-    ui_set_measure_all_status("SENDING TO SERVER...", 0xFFB300);
-    lv_timer_handler(); // Ép UI cập nhật chữ SENDING ngay lập tức
+    ui_set_measure_all_status("SENDING...", 0xFFB300);
 
-    // 1. Gửi qua MQTT (giữ nguyên logic cũ)
-    bool mqtt_sent = publishMeasureAllData(wifi, measureAllPendingDist, measureAllPendingObj, measureAllPendingAmb, measureAllPendingHr, measureAllPendingSpo2, measureAllPendingEcg);
-
-    // 2. Gửi qua HTTP lên Google Apps Script (Thêm mới)
-    bool http_sent = false;
-    if (WiFi.status() == WL_CONNECTED)
-    {
-        WiFiClientSecure secure;
-        secure.setInsecure();
-        HTTPClient http;
-
-        // Cấu trúc URL gửi cả HR, SPO2, ECG lên sheet
-        String url = GOOGLE_SCRIPT_URL +
-                     "?id=ALL" +
-                     "&obj=" + String(measureAllPendingObj, 2) +
-                     "&amb=" + String(measureAllPendingAmb, 2) +
-                     "&dist=" + String(measureAllPendingDist, 1) +
-                     "&hr=" + String(measureAllPendingHr) +
-                     "&spo2=" + String(measureAllPendingSpo2) +
-                     "&ecg=" + String(measureAllPendingEcg, 2);
-
-        if (http.begin(secure, url))
-        {
-            http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
-            http.setConnectTimeout(3000);
-            http.setTimeout(4000);
-            int httpCode = http.GET();
-            http_sent = (httpCode > 0);
-            if (!http_sent)
-            {
-                Serial.printf("[MEASURE_ALL] HTTP error: %s\n", http.errorToString(httpCode).c_str());
-            }
-            http.end();
-        }
-    }
-
-    if (mqtt_sent || http_sent)
+    bool sent = publishMeasureAllData(wifi,
+                                      measureAllPendingDist,
+                                      measureAllPendingObj,
+                                      measureAllPendingAmb,
+                                      measureAllPendingHr,
+                                      measureAllPendingSpo2,
+                                      measureAllPendingEcg);
+    if (sent)
     {
         ui_set_measure_all_status("SEND OK", 0x00E676);
     }
@@ -1088,11 +1009,6 @@ void maxSamplingTask(void *pvParameters)
 
 void guiTask(void *pvParameters)
 {
-    static unsigned long maLastRtPublishAt = 0;
-    static bool maSendEnabled = false;  // toggle bằng ENTER (giống các screen khác)
-    static uint8_t maLastSendState = 0; // 0-4 (xem ui_set_measure_all_send_state)
-    static unsigned long lastSensorUIUpdate = 0;
-
     Serial.println("[BOOT] guiTask start");
     // Tạo sampling tasks trước — chúng sẽ chờ sensor được init trong boot sequence bên dưới
     if (ecgSamplingTaskHandle == nullptr)
@@ -1304,50 +1220,10 @@ void guiTask(void *pvParameters)
             }
             else if (current_screen_type == SCR_MEASUREALL)
             {
-                // Đọc dữ liệu cảm biến liên tục
-                float liveTemp = sensorRuntime.mlxReady() ? sensorRuntime.mlxBodyTempC() : -1.0f;
-                SensorSnapshot maxSnap = sensorRuntime.maxSnapshot();
-                SensorSnapshot ecgSnap = sensorRuntime.ecgSnapshot();
-
-                int hr = maxSnap.signalReady ? maxSnap.heartRateBpm : 0;
-                int spo2 = maxSnap.signalReady ? maxSnap.spo2Percent : 0;
-
-                bool ecgLive = sensorRuntime.ad8232Ready() && ecgSnap.sensorReady && ecgSnap.signalReady;
-                float ecgVal = ecgLive ? getECGFilteredSignal() : 0.0f;
-
-                collectLastDistance = collect_live_distance();
-                float displayDist = collectLastDistance;
-                if (displayDist < 999.0f)
-                {
-                    displayDist += COLLECT_DIST_OFFSET_MM;
-                }
-
-                // Nhận tín hiệu nút ENTER để Đo / Gửi
-                if (ui_consume_measure_all_start_request())
-                {
-                    if (!measureAllPendingSend)
-                    {
-                        measure_all_prepare(); // Chụp snapshot data
-                    }
-                    else
-                    {
-                        measure_all_once(wifiConfigManager); // Gửi data
-                    }
-                }
-
-                // Cập nhật UI an toàn bằng biến đếm độc lập
-                static unsigned long lastMaSensorUpdate = 0;
-                if (millis() - lastMaSensorUpdate >= SENSOR_UI_UPDATE_MS)
-                {
-                    lastMaSensorUpdate = millis();
-                    if (!measureAllPendingSend)
-                    {
-                        // Sửa lỗi truyền 0.0f thành ecgVal
-                        ui_set_measure_all_values(liveTemp, hr, spo2, ecgVal, displayDist);
-                    }
-                }
-
-                continue;
+                Serial.println("[MEASURE_ALL] Entered measure all screen.");
+                collect_ensure_lox_ready();
+                sensorRuntime.beginMax30102();
+                ui_set_measure_all_status("ENTER: MEASURE & SEND", 0xAAAAAA);
             }
 
             refresh_wifi_header_ui(wifiConfigManager);
@@ -1634,6 +1510,43 @@ void guiTask(void *pvParameters)
                     float liveTemp = sensorRuntime.mlxReady() ? sensorRuntime.mlxBodyTempC() : -1.0f;
                     float liveAmb = sensorRuntime.mlxConnected() ? sensorRuntime.mlxAmbientTempC() : -999.0f;
                     ui_datacollector_update_sensors(displayDistance, liveTemp, liveAmb);
+                }
+
+                continue;
+            }
+
+            if (current_screen_type == SCR_MEASUREALL)
+            {
+                if (ui_consume_measure_all_start_request())
+                {
+                    if (!measureAllPendingSend)
+                    {
+                        measure_all_prepare();
+                    }
+                    else
+                    {
+                        measure_all_once(wifiConfigManager);
+                    }
+                }
+                else if (!measureAllPendingSend)
+                {
+                    float liveTemp = sensorRuntime.mlxReady() ? sensorRuntime.mlxBodyTempC() : -1.0f;
+                    SensorSnapshot maxSnap = sensorRuntime.maxSnapshot();
+                    SensorSnapshot ecgSnap = sensorRuntime.ecgSnapshot();
+                    int hr = maxSnap.signalReady ? maxSnap.heartRateBpm : 0;
+                    int spo2 = maxSnap.signalReady ? maxSnap.spo2Percent : 0;
+                    bool ecgLive = sensorRuntime.ad8232Ready() && ecgSnap.sensorReady && ecgSnap.signalReady;
+                    float ecgVal = ecgLive ? getECGFilteredSignal() : 0.0f;
+                    collectLastDistance = collect_live_distance();
+
+                    // Apply hardware offset for display
+                    float displayDist = collectLastDistance;
+                    if (displayDist < 999.0f)
+                    {
+                        displayDist += COLLECT_DIST_OFFSET_MM;
+                    }
+
+                    ui_set_measure_all_values(liveTemp, hr, spo2, ecgVal, displayDist);
                 }
 
                 continue;

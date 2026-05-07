@@ -2,6 +2,7 @@
 #include "custom_icons.h"
 #include "ui_datacollector.h"
 #include <WiFi.h>
+#include "boot_screen.h"
 // --- OPTIONAL: CUSTOM FONT ICONS (Font Awesome) ---
 // Uncomment sau khi generate font file từ https://lvgl.io/tools/fontconverter
 // Xem hướng dẫn chi tiết trong FONT_ICON_GUIDE.md
@@ -32,8 +33,8 @@ lv_chart_series_t *ser_ecg = NULL;
 lv_obj_t *lbl_hr_val = NULL;
 lv_obj_t *lbl_spo2_val = NULL;
 lv_obj_t *lbl_temp_val = NULL;
-lv_obj_t *lbl_temp_dist = NULL;
 lv_obj_t *lbl_temp_env_val = NULL;
+lv_obj_t *lbl_temp_dist_val = NULL;
 lv_obj_t *lbl_sensor_status = NULL;
 lv_obj_t *lbl_config_ip = NULL;
 lv_obj_t *lbl_config_status = NULL;
@@ -104,6 +105,7 @@ void draw_thermometer_icon(lv_obj_t *parent, int16_t x, int16_t y, lv_color_t co
 void wifi_scan_tick(lv_timer_t *timer);
 void wifi_scan_render_results();
 void start_wifi_scan_async();
+void build_boot();
 
 // Dialog state
 static lv_obj_t *active_dialog = NULL;
@@ -834,7 +836,7 @@ void clean_resources()
     lbl_spo2_val = NULL;
     lbl_temp_val = NULL;
     lbl_temp_env_val = NULL;
-    lbl_temp_dist = NULL;
+    lbl_temp_dist_val = NULL;
     lbl_sensor_status = NULL;
     lbl_config_ip = NULL;
     lbl_config_status = NULL;
@@ -1003,19 +1005,19 @@ void build_menu()
     create_header(scr, "MAIN MENU");
 
     // Grid Layout
-    static lv_coord_t col_dsc[] = {76, 76, 76, 76, LV_GRID_TEMPLATE_LAST};
-    static lv_coord_t row_dsc[] = {90, 90, LV_GRID_TEMPLATE_LAST};
+    static lv_coord_t col_dsc[] = {72, 72, 72, 72, LV_GRID_TEMPLATE_LAST};
+    static lv_coord_t row_dsc[] = {88, 88, LV_GRID_TEMPLATE_LAST};
 
     lv_obj_t *grid = lv_obj_create(scr);
-    lv_obj_set_size(grid, 320, 210);
+    lv_obj_set_size(grid, 312, 206);
     lv_obj_align(grid, LV_ALIGN_BOTTOM_MID, 0, 0);
     lock_scroll(grid);
     lv_obj_set_style_bg_opa(grid, 0, 0);
     lv_obj_set_style_border_width(grid, 0, 0);
     lv_obj_set_grid_dsc_array(grid, col_dsc, row_dsc);
     lv_obj_set_layout(grid, LV_LAYOUT_GRID);
-    lv_obj_set_style_pad_all(grid, 6, 0);
-    lv_obj_set_style_pad_gap(grid, 5, 0);
+    lv_obj_set_style_pad_all(grid, 2, 0);
+    lv_obj_set_style_pad_gap(grid, 3, 0);
 
     struct Item
     {
@@ -1041,6 +1043,7 @@ void build_menu()
         lv_obj_t *btn = lv_btn_create(grid);
         lv_obj_add_style(btn, &style_panel, 0);
         lv_obj_add_style(btn, &style_focus, LV_STATE_FOCUSED);
+        lv_obj_set_style_shadow_width(btn, 0, 0);
         lv_obj_set_grid_cell(btn, LV_GRID_ALIGN_STRETCH, i % kMenuCols, 1, LV_GRID_ALIGN_STRETCH, i / kMenuCols, 1);
         lv_obj_set_flex_flow(btn, LV_FLEX_FLOW_COLUMN);
         lv_obj_set_flex_align(btn, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
@@ -1146,11 +1149,11 @@ void build_monitor()
     create_header(scr, "MONITOR DASH");
 
     // Grid 2x2
-    static lv_coord_t col_dsc[] = {160, 160, LV_GRID_TEMPLATE_LAST};
-    static lv_coord_t row_dsc[] = {105, 105, LV_GRID_TEMPLATE_LAST};
+    static lv_coord_t col_dsc[] = {154, 154, LV_GRID_TEMPLATE_LAST};
+    static lv_coord_t row_dsc[] = {96, 96, LV_GRID_TEMPLATE_LAST};
 
     lv_obj_t *grid = lv_obj_create(scr);
-    lv_obj_set_size(grid, 320, 210);
+    lv_obj_set_size(grid, 312, 200);
     lv_obj_align(grid, LV_ALIGN_BOTTOM_MID, 0, 0);
     lock_scroll(grid);
     lv_obj_set_style_bg_opa(grid, 0, 0);
@@ -1158,11 +1161,12 @@ void build_monitor()
     lv_obj_set_grid_dsc_array(grid, col_dsc, row_dsc);
     lv_obj_set_layout(grid, LV_LAYOUT_GRID);
     lv_obj_set_style_pad_all(grid, 0, 0);
-    lv_obj_set_style_pad_gap(grid, 0, 0);
+    lv_obj_set_style_pad_gap(grid, 2, 0);
 
     // TOP LEFT: HR
     lv_obj_t *hr_box = lv_obj_create(grid);
     lv_obj_add_style(hr_box, &style_panel, 0);
+    lv_obj_set_style_shadow_width(hr_box, 0, 0);
     lock_scroll(hr_box);
     lv_obj_set_grid_cell(hr_box, LV_GRID_ALIGN_STRETCH, 0, 1, LV_GRID_ALIGN_STRETCH, 0, 1);
     lv_obj_set_flex_flow(hr_box, LV_FLEX_FLOW_COLUMN);
@@ -1186,6 +1190,7 @@ void build_monitor()
     // TOP RIGHT: SpO2
     lv_obj_t *spo2_box = lv_obj_create(grid);
     lv_obj_add_style(spo2_box, &style_panel, 0);
+    lv_obj_set_style_shadow_width(spo2_box, 0, 0);
     lock_scroll(spo2_box);
     lv_obj_set_grid_cell(spo2_box, LV_GRID_ALIGN_STRETCH, 1, 1, LV_GRID_ALIGN_STRETCH, 0, 1);
     lv_obj_set_flex_flow(spo2_box, LV_FLEX_FLOW_COLUMN);
@@ -1209,10 +1214,12 @@ void build_monitor()
     // BOTTOM WIDE: Body Temp | Env Temp
     lv_obj_t *temp_wide = lv_obj_create(grid);
     lv_obj_add_style(temp_wide, &style_panel, 0);
+    lv_obj_set_style_shadow_width(temp_wide, 0, 0);
     lock_scroll(temp_wide);
     lv_obj_set_grid_cell(temp_wide, LV_GRID_ALIGN_STRETCH, 0, 2, LV_GRID_ALIGN_STRETCH, 1, 1);
     lv_obj_set_flex_flow(temp_wide, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(temp_wide, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_all(temp_wide, 1, 0);
 
     // Body Temp (Left)
     lv_obj_t *body_cont = lv_obj_create(temp_wide);
@@ -1524,7 +1531,7 @@ void build_temp()
     lock_scroll(scr);
     create_header(scr, "THERMOMETER");
 
-    // Hiển thị Khoảng cách (góc trái trên)
+    // Distance (goc trai tren)
     lv_obj_t *dist_box = lv_obj_create(scr);
     lv_obj_set_size(dist_box, 90, 50);
     lv_obj_align(dist_box, LV_ALIGN_TOP_LEFT, 10, 32);
@@ -1535,14 +1542,14 @@ void build_temp()
     lv_obj_set_flex_align(dist_box, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
     lv_obj_t *dist_lbl = lv_label_create(dist_box);
-    lv_label_set_text(dist_lbl, "DISTANCE");
+    lv_label_set_text(dist_lbl, "DIST");
     lv_obj_set_style_text_color(dist_lbl, lv_color_hex(0xAAAAAA), 0);
     lv_obj_set_style_text_font(dist_lbl, &lv_font_montserrat_10, 0);
 
-    lbl_temp_dist = lv_label_create(dist_box);
-    lv_label_set_text(lbl_temp_dist, "-- mm");
-    lv_obj_set_style_text_color(lbl_temp_dist, lv_color_hex(0xFFFFFF), 0);
-    lv_obj_set_style_text_font(lbl_temp_dist, &lv_font_montserrat_14, 0);
+    lbl_temp_dist_val = lv_label_create(dist_box);
+    lv_label_set_text(lbl_temp_dist_val, "-- mm");
+    lv_obj_set_style_text_color(lbl_temp_dist_val, lv_color_hex(0x00E5FF), 0);
+    lv_obj_set_style_text_font(lbl_temp_dist_val, &lv_font_montserrat_14, 0);
 
     // Ambient Temp (góc phải trên)
     lv_obj_t *ambient_box = lv_obj_create(scr);
@@ -1666,24 +1673,25 @@ void build_measureall()
     lock_scroll(scr);
     create_header(scr, "MEASURE ALL");
 
-    static lv_coord_t col_dsc[] = {160, 160, LV_GRID_TEMPLATE_LAST};
-    static lv_coord_t row_dsc[] = {90, 90, LV_GRID_TEMPLATE_LAST};
+    static lv_coord_t col_dsc[] = {154, 154, LV_GRID_TEMPLATE_LAST};
+    static lv_coord_t row_dsc[] = {84, 84, LV_GRID_TEMPLATE_LAST};
 
     lv_obj_t *grid = lv_obj_create(scr);
-    lv_obj_set_size(grid, 320, 190);
+    lv_obj_set_size(grid, 312, 170);
     lv_obj_align(grid, LV_ALIGN_TOP_MID, 0, 30);
     lock_scroll(grid);
     lv_obj_set_style_bg_opa(grid, 0, 0);
     lv_obj_set_style_border_width(grid, 0, 0);
     lv_obj_set_grid_dsc_array(grid, col_dsc, row_dsc);
     lv_obj_set_layout(grid, LV_LAYOUT_GRID);
-    lv_obj_set_style_pad_all(grid, 4, 0);
-    lv_obj_set_style_pad_gap(grid, 4, 0);
+    lv_obj_set_style_pad_all(grid, 2, 0);
+    lv_obj_set_style_pad_gap(grid, 2, 0);
 
     auto build_cell = [&](const char *title, lv_color_t color, lv_obj_t **value_out, int col, int row)
     {
         lv_obj_t *box = lv_obj_create(grid);
         lv_obj_add_style(box, &style_panel, 0);
+        lv_obj_set_style_shadow_width(box, 0, 0);
         lock_scroll(box);
         lv_obj_set_grid_cell(box, LV_GRID_ALIGN_STRETCH, col, 1, LV_GRID_ALIGN_STRETCH, row, 1);
         lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
@@ -1824,7 +1832,7 @@ void build_wifi_scan()
     lv_obj_set_style_pad_row(wifi_scan_list, 5, 0);
     lv_obj_add_event_cb(wifi_scan_list, handle_back_key, LV_EVENT_KEY, NULL);
     // lv_group_add_obj(input_group, wifi_scan_list);
-    lv_group_focus_obj(wifi_scan_list);
+    // lv_group_focus_obj(wifi_scan_list);
 
     wifi_scan_spinner = lv_spinner_create(scr, 900, 70);
     lv_obj_set_size(wifi_scan_spinner, 34, 34);
@@ -2169,6 +2177,7 @@ void ui_switch_screen(ScreenType scr)
     switch (scr)
     {
     case SCR_BOOT:
+        build_boot();
         break;
     case SCR_MENU:
         build_menu();
@@ -2877,30 +2886,36 @@ void ui_set_measure_all_status(const char *msg, uint32_t colorHex)
 
 void ui_set_temp_distance(float distMm)
 {
-    if (!lbl_temp_dist)
+    static lv_obj_t *lastObj = NULL;
+    static int lastDistInt = -1;
+
+    if (!lbl_temp_dist_val)
     {
         return;
     }
 
-    if (distMm >= 999.0f)
+    if (lbl_temp_dist_val != lastObj)
     {
-        lv_label_set_text(lbl_temp_dist, "-- mm");
-        lv_obj_set_style_text_color(lbl_temp_dist, lv_color_hex(0xFFFFFF), 0);
+        lastObj = lbl_temp_dist_val;
+        lastDistInt = -1;
+    }
+
+    const int distInt = (distMm >= 0.0f && distMm < 999.0f) ? static_cast<int>(distMm + 0.5f) : -1;
+    if (distInt == lastDistInt)
+    {
+        return;
+    }
+
+    if (distInt >= 0)
+    {
+        char distText[16];
+        snprintf(distText, sizeof(distText), "%d mm", distInt);
+        lv_label_set_text(lbl_temp_dist_val, distText);
     }
     else
     {
-        char buf[16];
-        snprintf(buf, sizeof(buf), "%.0f mm", distMm);
-        lv_label_set_text(lbl_temp_dist, buf);
-
-        // Đổi màu thông minh: Chữ chuyển Xanh lá nếu khoảng cách đạt chuẩn (38-48mm), ngược lại là Vàng cảnh báo
-        if (distMm >= 38.0f && distMm <= 48.0f)
-        {
-            lv_obj_set_style_text_color(lbl_temp_dist, lv_color_hex(0x00E676), 0);
-        }
-        else
-        {
-            lv_obj_set_style_text_color(lbl_temp_dist, lv_color_hex(0xFFB300), 0);
-        }
+        lv_label_set_text(lbl_temp_dist_val, "-- mm");
     }
+
+    lastDistInt = distInt;
 }
