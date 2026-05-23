@@ -61,8 +61,21 @@ static lv_obj_t *lbl_header_wifi_icon = NULL;
 static lv_obj_t *lbl_header_wifi_signal = NULL;
 static lv_obj_t *lbl_header_wifi_ssid = NULL;
 static lv_obj_t *lbl_header_mqtt_status = NULL;
+static lv_obj_t *lbl_battery_percent = NULL;
+static lv_obj_t *lbl_battery_icon = NULL;
+static lv_obj_t *lbl_battery_charge_icon = NULL;
+static lv_obj_t *bar_battery_level = NULL;
 static lv_obj_t *ecg_lbl_warning = NULL;
 static lv_obj_t *ecg_beat_dot = NULL;
+
+static lv_obj_t *lbl_all_hr = NULL;
+static lv_obj_t *lbl_all_spo2 = NULL;
+static lv_obj_t *lbl_all_temp = NULL;
+static lv_obj_t *lbl_all_ecg = NULL;
+static lv_obj_t *lbl_all_dist = NULL;
+static lv_obj_t *lbl_all_status = NULL;
+static lv_obj_t *chart_ecg_mini = NULL;
+static lv_chart_series_t *ser_ecg_mini = NULL;
 
 static bool g_collect_take_requested = false;
 static bool g_collect_id_minus_requested = false;
@@ -72,7 +85,7 @@ static bool g_measure_all_start_requested = false;
 
 static bool is_measurement_screen_ui(ScreenType scr)
 {
-    return (scr == SCR_MONITOR || scr == SCR_ECG || scr == SCR_SPO2 || scr == SCR_TEMP);
+    return (scr == SCR_MONITOR || scr == SCR_ECG || scr == SCR_SPO2 || scr == SCR_TEMP || scr == SCR_MEASUREALL);
 }
 
 static void lock_scroll(lv_obj_t *obj)
@@ -858,6 +871,14 @@ void clean_resources()
     ecg_beat_dot = NULL;
     chart_ecg = NULL;
     ser_ecg = NULL;
+    chart_ecg_mini = NULL;
+    ser_ecg_mini = NULL;
+    lbl_all_hr = NULL;
+    lbl_all_spo2 = NULL;
+    lbl_all_temp = NULL;
+    lbl_all_ecg = NULL;
+    lbl_all_dist = NULL;
+    lbl_all_status = NULL;
 }
 
 void switch_to_obj(lv_obj_t *obj, ScreenType type)
@@ -894,52 +915,68 @@ void create_header(lv_obj_t *parent, const char *title)
 
     lv_obj_t *l = lv_label_create(h);
     lv_label_set_text(l, title);
-    lv_obj_set_width(l, 108);
+    lv_obj_set_width(l, 75);
     lv_label_set_long_mode(l, LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_color(l, lv_color_hex(0x00E5FF), 0);
     lv_obj_set_style_text_font(l, &lv_font_montserrat_12, 0);
-    lv_obj_align(l, LV_ALIGN_LEFT_MID, 6, 0);
+    lv_obj_align(l, LV_ALIGN_LEFT_MID, 5, 0);
 
     lbl_header_mqtt_status = lv_label_create(h);
     lv_label_set_text(lbl_header_mqtt_status, "SEND OFF");
-    lv_obj_set_width(lbl_header_mqtt_status, 56);
+    lv_obj_set_width(lbl_header_mqtt_status, 45);
     lv_label_set_long_mode(lbl_header_mqtt_status, LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_align(lbl_header_mqtt_status, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_font(lbl_header_mqtt_status, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(lbl_header_mqtt_status, lv_color_hex(0xFFB300), 0);
-    lv_obj_align(lbl_header_mqtt_status, LV_ALIGN_LEFT_MID, 116, 0);
+    lv_obj_align(lbl_header_mqtt_status, LV_ALIGN_LEFT_MID, 80, 0);
 
-    // WiFi icon + level + SSID (header status)
+    // ========== NHÓM BATTERY ==========
+    lbl_battery_icon = lv_label_create(h);
+    lv_label_set_text(lbl_battery_icon, ICON_BATTERY);
+    lv_obj_set_style_text_font(lbl_battery_icon, &lv_font_battery_24, 0);
+    lv_obj_set_style_text_color(lbl_battery_icon, lv_color_hex(0x00E676), 0);
+    lv_obj_align(lbl_battery_icon, LV_ALIGN_LEFT_MID, 130, 0);
+
+    lbl_battery_charge_icon = lv_label_create(h);
+    lv_label_set_text(lbl_battery_charge_icon, ICON_CHARGE);
+    lv_obj_set_style_text_font(lbl_battery_charge_icon, &lv_font_charge_24, 0);
+    lv_obj_set_style_text_color(lbl_battery_charge_icon, lv_color_hex(0x29B6F6), 0);
+    lv_obj_align(lbl_battery_charge_icon, LV_ALIGN_LEFT_MID, 136, -2);
+    lv_obj_add_flag(lbl_battery_charge_icon, LV_OBJ_FLAG_HIDDEN);
+
+    lbl_battery_percent = lv_label_create(h);
+    lv_label_set_text(lbl_battery_percent, "--");
+    lv_obj_set_width(lbl_battery_percent, 30);
+    lv_label_set_long_mode(lbl_battery_percent, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(lbl_battery_percent, LV_TEXT_ALIGN_LEFT, 0); // Đổi thành LEFT
+    lv_obj_set_style_text_font(lbl_battery_percent, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(lbl_battery_percent, lv_color_hex(0x00E676), 0);
+    lv_obj_align(lbl_battery_percent, LV_ALIGN_LEFT_MID, 155, 0); // Nằm sát ngay icon pin
+
+    // ========== NHÓM WiFi ==========
+    lbl_header_wifi_signal = lv_label_create(h);
+    lv_label_set_text(lbl_header_wifi_signal, "0/4");
+    lv_obj_set_width(lbl_header_wifi_signal, 22);
+    lv_label_set_long_mode(lbl_header_wifi_signal, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(lbl_header_wifi_signal, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_font(lbl_header_wifi_signal, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(lbl_header_wifi_signal, lv_color_hex(0x888888), 0);
+    lv_obj_align(lbl_header_wifi_signal, LV_ALIGN_LEFT_MID, 185, 0);
+
     lbl_header_wifi_icon = lv_label_create(h);
     lv_label_set_text(lbl_header_wifi_icon, ICON_WIFI);
     lv_obj_set_style_text_font(lbl_header_wifi_icon, &lv_font_wifi_24, 0);
     lv_obj_set_style_text_color(lbl_header_wifi_icon, lv_color_hex(0x888888), 0);
-    lv_obj_align(lbl_header_wifi_icon, LV_ALIGN_LEFT_MID, 258, 0);
-
-    lbl_header_wifi_signal = lv_label_create(h);
-    lv_label_set_text(lbl_header_wifi_signal, "0/4");
-    lv_obj_set_width(lbl_header_wifi_signal, 24);
-    lv_label_set_long_mode(lbl_header_wifi_signal, LV_LABEL_LONG_DOT);
-    lv_obj_set_style_text_align(lbl_header_wifi_signal, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_font(lbl_header_wifi_signal, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(lbl_header_wifi_signal, lv_color_hex(0x888888), 0);
-    lv_obj_align(lbl_header_wifi_signal, LV_ALIGN_LEFT_MID, 232, 0);
+    lv_obj_align(lbl_header_wifi_icon, LV_ALIGN_LEFT_MID, 210, 0);
 
     lbl_header_wifi_ssid = lv_label_create(h);
-    lv_label_set_text(lbl_header_wifi_ssid, "OFFLINE");
-    lv_obj_set_width(lbl_header_wifi_ssid, 56);
-    lv_obj_set_style_text_align(lbl_header_wifi_ssid, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_label_set_text(lbl_header_wifi_ssid, "OFF");
+    lv_obj_set_width(lbl_header_wifi_ssid, 55);
+    lv_obj_set_style_text_align(lbl_header_wifi_ssid, LV_TEXT_ALIGN_LEFT, 0); // SỬA LỖI: Căn TRÁI để chữ hiện sát icon Wifi
     lv_label_set_long_mode(lbl_header_wifi_ssid, LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_font(lbl_header_wifi_ssid, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(lbl_header_wifi_ssid, lv_color_hex(0x888888), 0);
-    lv_obj_align(lbl_header_wifi_ssid, LV_ALIGN_LEFT_MID, 174, 0);
-
-    // Battery icon (custom)
-    lv_obj_t *bat = lv_label_create(h);
-    lv_label_set_text(bat, ICON_BATTERY);
-    lv_obj_set_style_text_font(bat, &lv_font_battery_24, 0);
-    lv_obj_set_style_text_color(bat, lv_color_hex(0x00E676), 0);
-    lv_obj_align(bat, LV_ALIGN_LEFT_MID, 282, 0);
+    lv_obj_align(lbl_header_wifi_ssid, LV_ALIGN_LEFT_MID, 240, 0);
 }
 
 // --- 8. CÁC MÀN HÌNH (GIAO DIỆN CHÍNH) ---
@@ -1658,13 +1695,11 @@ void build_collectdata()
 }
 
 // MÀN HÌNH MEASURE ALL
-static lv_obj_t *lbl_all_hr = NULL;
-static lv_obj_t *lbl_all_spo2 = NULL;
-static lv_obj_t *lbl_all_temp = NULL;
-static lv_obj_t *lbl_all_ecg = NULL;
-static lv_obj_t *lbl_all_dist = NULL;
-static lv_obj_t *lbl_all_status = NULL;
-
+// Layout:
+//  [Header 28px]
+//  [HR | SpO2 | TEMP]  <- hàng ngang 3 ô, cao 58px
+//  [   ECG waveform  ] <- ô to, cao 120px
+//  [dist ... status]   <- footer 18px
 void build_measureall()
 {
     clean_resources();
@@ -1673,61 +1708,104 @@ void build_measureall()
     lock_scroll(scr);
     create_header(scr, "MEASURE ALL");
 
-    static lv_coord_t col_dsc[] = {154, 154, LV_GRID_TEMPLATE_LAST};
-    static lv_coord_t row_dsc[] = {84, 84, LV_GRID_TEMPLATE_LAST};
+    // ── HÀNG TRÊN: 3 ô chỉ số ──────────────────────────────────
+    // Mỗi ô rộng 102px, cao 58px, gap 3px, bắt đầu y=30 (dưới header)
+    const lv_coord_t TOP_Y = 30;
+    const lv_coord_t ROW_H = 58;
+    const lv_coord_t CELL_W = 102;
+    const lv_coord_t GAP = 3;
+    const lv_coord_t LEFT_X = 4;
 
-    lv_obj_t *grid = lv_obj_create(scr);
-    lv_obj_set_size(grid, 312, 170);
-    lv_obj_align(grid, LV_ALIGN_TOP_MID, 0, 30);
-    lock_scroll(grid);
-    lv_obj_set_style_bg_opa(grid, 0, 0);
-    lv_obj_set_style_border_width(grid, 0, 0);
-    lv_obj_set_grid_dsc_array(grid, col_dsc, row_dsc);
-    lv_obj_set_layout(grid, LV_LAYOUT_GRID);
-    lv_obj_set_style_pad_all(grid, 2, 0);
-    lv_obj_set_style_pad_gap(grid, 2, 0);
-
-    auto build_cell = [&](const char *title, lv_color_t color, lv_obj_t **value_out, int col, int row)
+    struct
     {
-        lv_obj_t *box = lv_obj_create(grid);
+        const char *title;
+        lv_color_t color;
+        lv_obj_t **out;
+    } cells[3] = {
+        {"HR", lv_color_hex(0xFF1744), &lbl_all_hr},
+        {"SpO2", lv_color_hex(0x00E5FF), &lbl_all_spo2},
+        {"TEMP", lv_color_hex(0xFF9800), &lbl_all_temp},
+    };
+
+    for (int i = 0; i < 3; i++)
+    {
+        lv_obj_t *box = lv_obj_create(scr);
         lv_obj_add_style(box, &style_panel, 0);
         lv_obj_set_style_shadow_width(box, 0, 0);
+        lv_obj_set_style_pad_all(box, 2, 0);
         lock_scroll(box);
-        lv_obj_set_grid_cell(box, LV_GRID_ALIGN_STRETCH, col, 1, LV_GRID_ALIGN_STRETCH, row, 1);
+        lv_obj_set_size(box, CELL_W, ROW_H);
+        lv_obj_set_pos(box, LEFT_X + i * (CELL_W + GAP), TOP_Y);
         lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
         lv_obj_set_flex_align(box, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-        lv_obj_t *lbl = lv_label_create(box);
-        lv_label_set_text(lbl, title);
-        lv_obj_set_style_text_color(lbl, lv_color_hex(0x999999), 0);
-        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_10, 0);
+        lv_obj_t *lbl_title = lv_label_create(box);
+        lv_label_set_text(lbl_title, cells[i].title);
+        lv_obj_set_style_text_color(lbl_title, lv_color_hex(0x888888), 0);
+        lv_obj_set_style_text_font(lbl_title, &lv_font_montserrat_10, 0);
 
-        *value_out = lv_label_create(box);
-        lv_label_set_text(*value_out, "--");
-        lv_obj_set_style_text_font(*value_out, &lv_font_montserrat_28, 0);
-        lv_obj_set_style_text_color(*value_out, color, 0);
-    };
+        *cells[i].out = lv_label_create(box);
+        lv_label_set_text(*cells[i].out, "--");
+        lv_obj_set_style_text_font(*cells[i].out, &lv_font_montserrat_24, 0);
+        lv_obj_set_style_text_color(*cells[i].out, cells[i].color, 0);
+    }
 
-    build_cell("HEART RATE", lv_color_hex(0xFF1744), &lbl_all_hr, 0, 0);
-    build_cell("SPO2", lv_color_hex(0x00E5FF), &lbl_all_spo2, 1, 0);
-    build_cell("TEMP", lv_color_hex(0xFF9800), &lbl_all_temp, 0, 1);
-    build_cell("ECG", lv_color_hex(0x00E676), &lbl_all_ecg, 1, 1);
+    // ── Ô DƯỚI: ECG waveform to ────────────────────────────────
+    // y = TOP_Y + ROW_H + GAP, cao = 240 - header(28) - ROW_H - GAP - footer(18) - gap*2
+    const lv_coord_t ECG_Y = TOP_Y + ROW_H + GAP;
+    const lv_coord_t ECG_W = 312;
+    const lv_coord_t ECG_H = 240 - 28 - ROW_H - GAP * 2 - 18; // ~113px
+
+    lv_obj_t *ecg_box = lv_obj_create(scr);
+    lv_obj_add_style(ecg_box, &style_panel, 0);
+    lv_obj_set_style_shadow_width(ecg_box, 0, 0);
+    lv_obj_set_style_pad_all(ecg_box, 3, 0);
+    lv_obj_set_style_bg_color(ecg_box, lv_color_hex(0x050505), 0);
+    lock_scroll(ecg_box);
+    lv_obj_set_size(ecg_box, ECG_W, ECG_H);
+    lv_obj_set_pos(ecg_box, LEFT_X, ECG_Y);
+
+    lv_obj_t *ecg_label = lv_label_create(ecg_box);
+    lv_label_set_text(ecg_label, "ECG");
+    lv_obj_set_style_text_color(ecg_label, lv_color_hex(0x444444), 0);
+    lv_obj_set_style_text_font(ecg_label, &lv_font_montserrat_10, 0);
+    lv_obj_align(ecg_label, LV_ALIGN_TOP_LEFT, 2, 1);
+
+    chart_ecg_mini = lv_chart_create(ecg_box);
+    lv_obj_set_size(chart_ecg_mini, ECG_W - 6, ECG_H - 6);
+    lv_obj_align(chart_ecg_mini, LV_ALIGN_CENTER, 0, 0);
+    lv_chart_set_type(chart_ecg_mini, LV_CHART_TYPE_LINE);
+    lv_chart_set_point_count(chart_ecg_mini, 120);
+    lv_chart_set_range(chart_ecg_mini, LV_CHART_AXIS_PRIMARY_Y, 0, 200);
+    lv_chart_set_update_mode(chart_ecg_mini, LV_CHART_UPDATE_MODE_CIRCULAR);
+    lv_obj_set_style_bg_color(chart_ecg_mini, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(chart_ecg_mini, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(chart_ecg_mini, 0, 0);
+    lv_obj_set_style_size(chart_ecg_mini, 0, LV_PART_INDICATOR);
+    lv_obj_set_style_line_width(chart_ecg_mini, 2, LV_PART_ITEMS);
+    lv_obj_set_style_line_color(chart_ecg_mini, lv_color_hex(0x0a2010), LV_PART_MAIN);
+    lv_chart_set_div_line_count(chart_ecg_mini, 3, 6);
+    ser_ecg_mini = lv_chart_add_series(chart_ecg_mini, lv_color_hex(0x00E676), LV_CHART_AXIS_PRIMARY_Y);
+
+    // ── FOOTER: dist (trái) + status (phải) ────────────────────
+    const lv_coord_t FOOTER_Y = ECG_Y + ECG_H + GAP;
 
     lbl_all_dist = lv_label_create(scr);
     lv_label_set_text(lbl_all_dist, "DIST: -- mm");
-    lv_obj_set_style_text_font(lbl_all_dist, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(lbl_all_dist, lv_color_hex(0xBBBBBB), 0);
-    lv_obj_align(lbl_all_dist, LV_ALIGN_BOTTOM_LEFT, 8, -20);
+    lv_obj_set_style_text_font(lbl_all_dist, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(lbl_all_dist, lv_color_hex(0x888888), 0);
+    lv_obj_set_pos(lbl_all_dist, LEFT_X + 2, FOOTER_Y);
 
     lbl_all_status = lv_label_create(scr);
     lv_label_set_text(lbl_all_status, "ENTER: MEASURE & SEND");
-    lv_obj_set_width(lbl_all_status, 300);
+    lv_obj_set_width(lbl_all_status, 200);
     lv_label_set_long_mode(lbl_all_status, LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_align(lbl_all_status, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_set_style_text_font(lbl_all_status, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(lbl_all_status, lv_color_hex(0xAAAAAA), 0);
-    lv_obj_align(lbl_all_status, LV_ALIGN_BOTTOM_RIGHT, -8, -20);
+    lv_obj_set_pos(lbl_all_status, 116, FOOTER_Y);
 
+    // dummy button để bắt key
     lv_obj_t *dummy = lv_btn_create(scr);
     lv_obj_set_size(dummy, 1, 1);
     lv_obj_add_event_cb(dummy, handle_back_key, LV_EVENT_KEY, NULL);
@@ -2649,63 +2727,42 @@ void ui_set_wifi_connect_feedback(const char *msg, uint32_t colorHex)
 
 void ui_set_header_wifi(const char *signalLevel, const char *ssid, uint32_t colorHex)
 {
-    static lv_obj_t *lastIconObj = NULL;
-    static lv_obj_t *lastSignalObj = NULL;
     static lv_obj_t *lastSsidObj = NULL;
-    static uint32_t lastColor = 0;
+    static uint32_t lastColor = 0xFFFFFFFF; // Set giá trị ảo ban đầu
     static String lastSignal = "";
     static String lastSsid = "";
 
     String nextSignal = signalLevel ? String(signalLevel) : String("0/4");
-    String nextSsid = ssid ? String(ssid) : String("OFFLINE");
+    String nextSsid = ssid ? String(ssid) : String("OFF");
 
-    if (lbl_header_wifi_icon)
+    // Khi chuyển màn hình, con trỏ object thay đổi -> Bắt buộc Reset toàn bộ Cache
+    if (lbl_header_wifi_ssid != lastSsidObj)
     {
-        if (lbl_header_wifi_icon != lastIconObj)
-        {
-            lastIconObj = lbl_header_wifi_icon;
-            lastColor = 0;
-        }
-        if (colorHex != lastColor)
-        {
-            lv_obj_set_style_text_color(lbl_header_wifi_icon, lv_color_hex(colorHex), 0);
-        }
+        lastSsidObj = lbl_header_wifi_ssid;
+        lastColor = 0xFFFFFFFF;
+        lastSignal = "";
+        lastSsid = "";
+    }
+
+    if (lbl_header_wifi_icon && colorHex != lastColor)
+    {
+        lv_obj_set_style_text_color(lbl_header_wifi_icon, lv_color_hex(colorHex), 0);
     }
 
     if (lbl_header_wifi_signal)
     {
-        if (lbl_header_wifi_signal != lastSignalObj)
-        {
-            lastSignalObj = lbl_header_wifi_signal;
-            lastColor = 0;
-            lastSignal = "";
-        }
         if (colorHex != lastColor)
-        {
             lv_obj_set_style_text_color(lbl_header_wifi_signal, lv_color_hex(colorHex), 0);
-        }
         if (nextSignal != lastSignal)
-        {
             lv_label_set_text(lbl_header_wifi_signal, nextSignal.c_str());
-        }
     }
 
     if (lbl_header_wifi_ssid)
     {
-        if (lbl_header_wifi_ssid != lastSsidObj)
-        {
-            lastSsidObj = lbl_header_wifi_ssid;
-            lastColor = 0;
-            lastSsid = "";
-        }
         if (colorHex != lastColor)
-        {
             lv_obj_set_style_text_color(lbl_header_wifi_ssid, lv_color_hex(colorHex), 0);
-        }
         if (nextSsid != lastSsid)
-        {
             lv_label_set_text(lbl_header_wifi_ssid, nextSsid.c_str());
-        }
     }
 
     lastColor = colorHex;
@@ -2884,6 +2941,70 @@ void ui_set_measure_all_status(const char *msg, uint32_t colorHex)
     lv_obj_set_style_text_color(lbl_all_status, lv_color_hex(colorHex), 0);
 }
 
+void ui_update_measureall_ecg(float ecg_mv, bool leads_connected)
+{
+    if (current_screen_type != SCR_MEASUREALL || !chart_ecg_mini || !ser_ecg_mini)
+    {
+        return;
+    }
+
+    static unsigned long lastUpdate = 0;
+    static float displayBaseline = 0.0f;
+    static float displayFiltered = 0.0f;
+    static float envelope = 130.0f;
+    static float yScale = 230.0f;
+    static bool needsReprime = true;
+
+    if (!leads_connected)
+    {
+        needsReprime = true;
+        lv_chart_set_next_value(chart_ecg_mini, ser_ecg_mini, 100);
+        return;
+    }
+
+    if (needsReprime)
+    {
+        displayBaseline = ecg_mv;
+        displayFiltered = 0.0f;
+        envelope = 130.0f;
+        yScale = 230.0f;
+        lastUpdate = millis();
+        needsReprime = false;
+    }
+
+    if (millis() - lastUpdate >= 8)
+    {
+        lastUpdate = millis();
+
+        float baselineInput = constrain(ecg_mv, -90.0f, 90.0f);
+        displayBaseline = 0.992f * displayBaseline + 0.008f * baselineInput;
+        float centered = ecg_mv - displayBaseline;
+
+        float delta = fabsf(centered - displayFiltered);
+        float smoothAlpha = (delta > 40.0f) ? 0.28f : 0.58f;
+        displayFiltered = smoothAlpha * displayFiltered + (1.0f - smoothAlpha) * centered;
+
+        float absDisplay = fabsf(displayFiltered);
+        if (absDisplay > envelope)
+            envelope = 0.20f * absDisplay + 0.80f * envelope;
+        else
+            envelope = 0.005f * absDisplay + 0.995f * envelope;
+        envelope = constrain(envelope, 95.0f, 320.0f);
+
+        float targetScale = envelope * 1.90f;
+        if (targetScale < 230.0f)
+            targetScale = 230.0f;
+        yScale = 0.97f * yScale + 0.03f * targetScale;
+        yScale = constrain(yScale, 210.0f, 430.0f);
+
+        float limited = constrain(displayFiltered, -0.95f * yScale, 0.95f * yScale);
+        int ecgChart = (int)((limited / yScale + 1.0f) * 100.0f);
+        ecgChart = constrain(ecgChart, 0, 200);
+
+        lv_chart_set_next_value(chart_ecg_mini, ser_ecg_mini, ecgChart);
+    }
+}
+
 void ui_set_temp_distance(float distMm)
 {
     static lv_obj_t *lastObj = NULL;
@@ -2918,4 +3039,90 @@ void ui_set_temp_distance(float distMm)
     }
 
     lastDistInt = distInt;
+}
+
+/**
+ * @brief Cập nhật icon và % pin trên header.
+ *
+ * Màu icon thay đổi theo mức pin:
+ *   >= 50%  → xanh lá   (0x00E676)
+ *   >= 20%  → vàng cam  (0xFFB300)
+ *    < 20%  → đỏ        (0xFF5252)
+ * Khi đang sạc: icon chuyển xanh dương (0x29B6F6)
+ * Khi TP5100 báo FULL: hiển thị FULL màu xanh lá
+ *
+ * @param percent  % pin từ INA219 (0–100)
+ * @param charging true nếu TP5100 CHRG active
+ * @param full     true nếu TP5100 STDBY/FULL active
+ */
+void ui_set_battery(uint8_t percent, bool charging, bool full)
+{
+    static lv_obj_t *lastObj = NULL;
+    static uint8_t lastPercent = 255;
+    static bool lastCharging = false;
+    static bool lastFull = false;
+
+    // Reset cache nếu đổi màn hình
+    if (lbl_battery_percent != lastObj)
+    {
+        lastObj = lbl_battery_percent;
+        lastPercent = 255;
+        lastFull = false;
+    }
+
+    if (percent == lastPercent && charging == lastCharging && full == lastFull)
+    {
+        return;
+    }
+    lastPercent = percent;
+    lastCharging = charging;
+    lastFull = full;
+
+    // QUY TẮC MÀU SẮC
+    uint32_t color;
+    if (full)
+        color = 0x00E676; // Đầy pin -> Xanh lá
+    else if (charging)
+        color = 0x29B6F6; // Đang sạc -> Xanh dương
+    else if (percent >= 50)
+        color = 0x00E676; // Trên 50% -> Xanh lá
+    else if (percent >= 20)
+        color = 0xFFB300; // Trên 20% -> Vàng Cam
+    else
+        color = 0xFF5252; // Dưới 20% -> Đỏ
+
+    // Cập nhật màu Icon
+    if (lbl_battery_icon)
+    {
+        lv_obj_set_style_text_color(lbl_battery_icon, lv_color_hex(color), 0);
+    }
+
+    if (lbl_battery_charge_icon)
+    {
+        if (charging && !full)
+        {
+            lv_obj_clear_flag(lbl_battery_charge_icon, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_style_text_color(lbl_battery_charge_icon, lv_color_hex(0x29B6F6), 0);
+        }
+        else
+        {
+            lv_obj_add_flag(lbl_battery_charge_icon, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+
+    // Cập nhật Text và màu Text (% pin)
+    if (lbl_battery_percent)
+    {
+        char buf[8];
+        if (full)
+        {
+            snprintf(buf, sizeof(buf), "FULL");
+        }
+        else
+        {
+            snprintf(buf, sizeof(buf), "%d%%", percent);
+        }
+        lv_label_set_text(lbl_battery_percent, buf);
+        lv_obj_set_style_text_color(lbl_battery_percent, lv_color_hex(color), 0);
+    }
 }

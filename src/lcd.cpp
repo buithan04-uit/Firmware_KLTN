@@ -34,6 +34,8 @@ static constexpr uint32_t LIVE_LOG_INTERVAL_MS = 1500;
 static constexpr uint32_t MQTT_RECONNECT_INTERVAL_MS = 3000;
 static constexpr uint32_t MQTT_PUBLISH_INTERVAL_MS = 700;
 static constexpr uint32_t MQTT_OK_LOG_INTERVAL_MS = 1500;
+static constexpr uint8_t TP5100_CHRG_PIN = 34; // TLP521-2 output CHRG, active LOW
+static constexpr uint8_t TP5100_FULL_PIN = 35; // TLP521-2 output STDBY/FULL, active LOW
 static constexpr size_t MQTT_PAYLOAD_BUFFER = 384;
 static constexpr uint8_t COLLECT_SAMPLE_LIMIT = 5;
 static constexpr int COLLECT_MEASUREMENT_SAMPLES = 30;
@@ -81,6 +83,13 @@ static float measureAllPendingAmb = 0.0f;
 static float measureAllPendingEcg = 0.0f;
 static int measureAllPendingHr = 0;
 static int measureAllPendingSpo2 = 0;
+
+static void updateTp5100ChargeStatus()
+{
+    const bool chargingActive = (digitalRead(TP5100_CHRG_PIN) == LOW);
+    const bool fullActive = (digitalRead(TP5100_FULL_PIN) == LOW);
+    sensorRuntime.setBatteryChargeStatus(chargingActive, fullActive);
+}
 
 __attribute__((constructor)) static void early_boot_log()
 {
@@ -239,6 +248,26 @@ static void publishTelemetryIfReady(const WifiConfigManager &wifi, const LcdSens
         if (runtime.mlxReady())
         {
             doc["temp"] = runtime.mlxBodyTempC();
+            hasField = true;
+        }
+        break;
+
+    case SCR_MEASUREALL:
+        modeName = "measureall";
+        if (latestMaxLive)
+        {
+            doc["hr"] = latestMaxSnapshot.heartRateBpm;
+            doc["spo2"] = latestMaxSnapshot.spo2Percent;
+            hasField = true;
+        }
+        if (runtime.mlxReady())
+        {
+            doc["temp"] = runtime.mlxBodyTempC();
+            hasField = true;
+        }
+        if (latestEcgLive)
+        {
+            doc["ecg"] = latestEcgSample;
             hasField = true;
         }
         break;
@@ -466,7 +495,7 @@ static bool is_temp_screen(ScreenType scr)
 
 static bool is_publish_screen(ScreenType scr)
 {
-    return (scr == SCR_MONITOR || scr == SCR_ECG || scr == SCR_SPO2 || scr == SCR_TEMP);
+    return (scr == SCR_MONITOR || scr == SCR_ECG || scr == SCR_SPO2 || scr == SCR_TEMP || scr == SCR_MEASUREALL);
 }
 
 static const char *screen_name(ScreenType scr)
@@ -500,12 +529,6 @@ static const char *screen_name(ScreenType scr)
 
 static void refresh_mqtt_ui_status(ScreenType screen)
 {
-    if (screen == SCR_MEASUREALL)
-    {
-        ui_set_mqtt_status("AUTO", 0x00E5FF);
-        return;
-    }
-
     if (!is_publish_screen(screen))
     {
         ui_set_mqtt_status("-", 0x666666);
@@ -524,7 +547,7 @@ static void refresh_mqtt_ui_status(ScreenType screen)
 
 static void refresh_collect_wifi_ui(WifiConfigManager &wifi)
 {
-    String ssid = "OFFLINE";
+    String ssid = "OFF";
     String level = "0/4";
     uint32_t color = 0xFF5252;
 
@@ -1031,6 +1054,7 @@ void guiTask(void *pvParameters)
 
     // Init sensors tại đây (sau khi boot screen đã render) để badge nhận đúng kết quả
     sensorRuntime.begin();
+    updateTp5100ChargeStatus();
     boot_screen_set_sensor_status(BOOT_SENSOR_AD8232,
                                   sensorRuntime.ad8232Ready() ? BOOT_SENSOR_OK : BOOT_SENSOR_RETRY);
     boot_screen_set_progress(40);
@@ -1093,19 +1117,11 @@ void guiTask(void *pvParameters)
                                          (current_screen_type == SCR_MONITOR) ||
                                          (current_screen_type == SCR_COLLECTDATA) ||
                                          (current_screen_type == SCR_MEASUREALL);
-        // Sửa đoạn updateBackground thành:
-        if (mlxSamplingRequired)
+        updateTp5100ChargeStatus();
+        if (xSemaphoreTake(i2c0Mutex, pdMS_TO_TICKS(10)) == pdTRUE)
         {
-            // MLX cần I2C0, phải xin chìa khóa
-            if (xSemaphoreTake(i2c0Mutex, pdMS_TO_TICKS(10)) == pdTRUE)
-            {
-                sensorRuntime.updateBackground(true);
-                xSemaphoreGive(i2c0Mutex);
-            }
-        }
-        else
-        {
-            sensorRuntime.updateBackground(false);
+            sensorRuntime.updateBackground(mlxSamplingRequired);
+            xSemaphoreGive(i2c0Mutex);
         }
 
         // Keep scheduler responsive so ECG background sampling can stay close to 250Hz.
@@ -1223,10 +1239,11 @@ void guiTask(void *pvParameters)
                 Serial.println("[MEASURE_ALL] Entered measure all screen.");
                 collect_ensure_lox_ready();
                 sensorRuntime.beginMax30102();
-                ui_set_measure_all_status("ENTER: MEASURE & SEND", 0xAAAAAA);
+                ui_set_measure_all_status("ENTER: TOGGLE SEND", 0xAAAAAA);
             }
 
             refresh_wifi_header_ui(wifiConfigManager);
+            ui_set_battery(sensorRuntime.batteryPercent(), sensorRuntime.batteryCharging(), sensorRuntime.batteryFull());
             lastScreen = current_screen_type;
         }
 
@@ -1266,6 +1283,27 @@ void guiTask(void *pvParameters)
                 {
                     refresh_collect_wifi_ui(wifiConfigManager);
                 }
+            }
+
+            // Update battery indicator every 2 seconds (works on all screens including boot)
+            static unsigned long lastBatteryUpdate = 0;
+            if (millis() - lastBatteryUpdate >= 2000)
+            {
+                lastBatteryUpdate = millis();
+                ui_set_battery(
+                    sensorRuntime.batteryPercent(),
+                    sensorRuntime.batteryCharging(),
+                    sensorRuntime.batteryFull());
+
+                const INA219Snapshot bat = sensorRuntime.ina219Snapshot();
+                Serial.printf("[BAT] ready=%d V=%.3f I=%.1fmA P=%d%% chg=%d full=%d present=%d\n",
+                              sensorRuntime.ina219Ready() ? 1 : 0,
+                              bat.busVoltageV,
+                              bat.currentMa,
+                              bat.batteryPercent,
+                              bat.isCharging ? 1 : 0,
+                              bat.isFull ? 1 : 0,
+                              bat.chargerPresent ? 1 : 0);
             }
 
             if (lastMlxReady != sensorRuntime.mlxReady())
@@ -1517,38 +1555,36 @@ void guiTask(void *pvParameters)
 
             if (current_screen_type == SCR_MEASUREALL)
             {
-                if (ui_consume_measure_all_start_request())
-                {
-                    if (!measureAllPendingSend)
-                    {
-                        measure_all_prepare();
-                    }
-                    else
-                    {
-                        measure_all_once(wifiConfigManager);
-                    }
-                }
-                else if (!measureAllPendingSend)
-                {
-                    float liveTemp = sensorRuntime.mlxReady() ? sensorRuntime.mlxBodyTempC() : -1.0f;
-                    SensorSnapshot maxSnap = sensorRuntime.maxSnapshot();
-                    SensorSnapshot ecgSnap = sensorRuntime.ecgSnapshot();
-                    int hr = maxSnap.signalReady ? maxSnap.heartRateBpm : 0;
-                    int spo2 = maxSnap.signalReady ? maxSnap.spo2Percent : 0;
-                    bool ecgLive = sensorRuntime.ad8232Ready() && ecgSnap.sensorReady && ecgSnap.signalReady;
-                    float ecgVal = ecgLive ? getECGFilteredSignal() : 0.0f;
-                    collectLastDistance = collect_live_distance();
+                float liveTemp = sensorRuntime.mlxReady() ? sensorRuntime.mlxBodyTempC() : -1.0f;
+                SensorSnapshot maxSnap = sensorRuntime.maxSnapshot();
+                SensorSnapshot ecgSnap = sensorRuntime.ecgSnapshot();
+                int hr = maxSnap.signalReady ? maxSnap.heartRateBpm : 0;
+                int spo2 = maxSnap.signalReady ? maxSnap.spo2Percent : 0;
+                bool ecgLive = sensorRuntime.ad8232Ready() && ecgSnap.sensorReady && ecgSnap.signalReady;
+                float ecgVal = ecgLive ? getECGFilteredSignal() : 0.0f;
+                collectLastDistance = collect_live_distance();
 
-                    // Apply hardware offset for display
-                    float displayDist = collectLastDistance;
-                    if (displayDist < 999.0f)
-                    {
-                        displayDist += COLLECT_DIST_OFFSET_MM;
-                    }
-
-                    ui_set_measure_all_values(liveTemp, hr, spo2, ecgVal, displayDist);
+                float displayDist = collectLastDistance;
+                if (displayDist < 999.0f)
+                {
+                    displayDist += COLLECT_DIST_OFFSET_MM;
                 }
 
+                // Cập nhật latestEcgLive/latestEcgSample để publishTelemetryIfReady dùng
+                latestEcgLive = ecgLive;
+                latestEcgSample = ecgVal;
+                if (maxSnap.signalReady)
+                {
+                    latestMaxLive = true;
+                    latestMaxSnapshot = maxSnap;
+                }
+                else
+                {
+                    latestMaxLive = false;
+                }
+
+                ui_set_measure_all_values(liveTemp, hr, spo2, ecgVal, displayDist);
+                publishTelemetryIfReady(wifiConfigManager, sensorRuntime, current_screen_type);
                 continue;
             }
 
@@ -1746,6 +1782,10 @@ void setup()
 {
     Serial.begin(115200);
     delay(200);
+
+    pinMode(TP5100_CHRG_PIN, INPUT);
+    pinMode(TP5100_FULL_PIN, INPUT);
+
     Serial.printf("[BOOT] reset_reason=%d\n", esp_reset_reason());
     Serial.printf("[BOOT] chip_rev=%d\n", ESP.getChipRevision());
 

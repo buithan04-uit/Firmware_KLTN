@@ -16,6 +16,9 @@ extern "C"
 /*-----------------------------------------------------------------------------
  * FONT DECLARATIONS
  *---------------------------------------------------------------------------*/
+// CHARGE icon font
+LV_FONT_DECLARE(lv_font_charge_24);
+
 // OXYGEN icon font
 LV_FONT_DECLARE(lv_font_oxygen_24);
 
@@ -52,6 +55,9 @@ LV_FONT_DECLARE(lv_font_monitor_24);
 /*-----------------------------------------------------------------------------
  * ICON DEFINITIONS (UTF-8 Encoded)
  *---------------------------------------------------------------------------*/
+// CHARGE icon (U+EA0B)
+#define ICON_CHARGE "\xEE\xA8\x8B"
+
 // OXYGEN icon (U+F6DB)
 #define ICON_OXYGEN "\xEF\x9B\x9B"
 

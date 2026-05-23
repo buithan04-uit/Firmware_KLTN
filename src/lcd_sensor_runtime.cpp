@@ -22,6 +22,18 @@ void LcdSensorRuntime::begin()
         Serial.println("[ECG] AD8232/ADS1115 unavailable at startup.");
     }
 
+    ina219Module_.setBatteryType(BatteryType::LiPo_2S); // 6.6V–8.4V (0% at 6.6V)
+    ina219Ready_ = ina219Module_.begin();
+    if (ina219Ready_)
+    {
+        Serial.println("[INA219] Battery monitor initialized (2S LiPo).");
+        ina219Snapshot_ = ina219Module_.snapshot();
+    }
+    else
+    {
+        Serial.println("[INA219] Not detected, will retry in background.");
+    }
+
     // Sync mlxConnected_ immediately from begin() result so boot screen
     // reads correct status without needing updateBackground() first.
     const SensorSnapshot mlxInitSnap = mlx90614Module_.snapshot();
@@ -36,6 +48,11 @@ void LcdSensorRuntime::begin()
 
 void LcdSensorRuntime::updateBackground(bool enableMlxUpdate)
 {
+    // INA219 luôn update bất kể enableMlxUpdate
+    ina219Module_.update();
+    ina219Snapshot_ = ina219Module_.snapshot();
+    ina219Ready_ = ina219Snapshot_.sensorReady;
+
     if (!enableMlxUpdate)
     {
         return;
@@ -164,4 +181,48 @@ SensorSnapshot LcdSensorRuntime::maxSnapshot() const
     SensorSnapshot copy = maxSnapshot_;
     portEXIT_CRITICAL(&maxMux_);
     return copy;
+}
+
+bool LcdSensorRuntime::ina219Ready() const
+{
+    return ina219Ready_;
+}
+
+uint8_t LcdSensorRuntime::batteryPercent() const
+{
+    return ina219Snapshot_.batteryPercent;
+}
+
+float LcdSensorRuntime::batteryVoltageV() const
+{
+    return ina219Snapshot_.busVoltageV;
+}
+
+float LcdSensorRuntime::batteryCurrentMa() const
+{
+    return ina219Snapshot_.currentMa;
+}
+
+bool LcdSensorRuntime::batteryCharging() const
+{
+    return ina219Snapshot_.isCharging;
+}
+
+INA219Snapshot LcdSensorRuntime::ina219Snapshot() const
+{
+    return ina219Snapshot_;
+}
+bool LcdSensorRuntime::batteryFull() const
+{
+    return ina219Snapshot_.isFull;
+}
+
+bool LcdSensorRuntime::batteryChargerPresent() const
+{
+    return ina219Snapshot_.chargerPresent;
+}
+
+void LcdSensorRuntime::setBatteryChargeStatus(bool chargingActive, bool fullActive)
+{
+    ina219Module_.setExternalChargeStatus(chargingActive, fullActive);
 }

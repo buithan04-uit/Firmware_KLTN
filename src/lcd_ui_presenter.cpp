@@ -68,7 +68,7 @@ void refresh_config_ui(WifiConfigManager &wifiConfigManager)
 
 void refresh_wifi_header_ui(WifiConfigManager &wifiConfigManager)
 {
-    String ssid = "OFFLINE";
+    String ssid = "OFF";
     String level = "0/4";
     uint32_t color = 0xFF5252;
 
