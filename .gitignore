@@ -3,3 +3,8 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+
+# Keep the public README and agent instructions, ignore other Markdown docs.
+*.md
+!README.md
+!AGENTS.md
