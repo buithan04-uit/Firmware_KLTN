@@ -82,6 +82,7 @@ static bool g_collect_id_minus_requested = false;
 static bool g_collect_id_plus_requested = false;
 static bool g_collect_reset_requested = false;
 static bool g_measure_all_start_requested = false;
+static bool g_collect_session_plus_requested = false;
 
 static bool is_measurement_screen_ui(ScreenType scr)
 {
@@ -1155,6 +1156,10 @@ static void collectdata_key_handler(lv_event_t *e)
     else if (key == LV_KEY_RIGHT)
     {
         g_collect_id_plus_requested = true;
+    }
+    else if (key == LV_KEY_UP)
+    {
+        g_collect_session_plus_requested = true;
     }
     else if (key == LV_KEY_DOWN)
     {
@@ -2834,6 +2839,17 @@ bool ui_consume_collect_id_plus_request()
         return false;
     }
     g_collect_id_plus_requested = false;
+    return true;
+}
+
+bool ui_consume_collect_session_plus_request()
+{
+    if (!g_collect_session_plus_requested)
+    {
+        return false;
+    }
+
+    g_collect_session_plus_requested = false;
     return true;
 }
 

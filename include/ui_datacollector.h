@@ -81,6 +81,7 @@ extern "C"
      * @param id Current person ID
      */
     void ui_datacollector_update_id(int id);
+    void ui_datacollector_update_session(int personId, int sessionId);
 
     /**
      * @brief Update progress counter

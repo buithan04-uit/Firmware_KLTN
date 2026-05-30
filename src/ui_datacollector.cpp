@@ -131,10 +131,10 @@ extern "C"
                                   lv_color_hex(0x0A0A), 3, true);
         lv_obj_set_style_border_color(ui_IDPanel, lv_color_hex(0x4208), 0);
 
-        ui_IDLabel = create_label(ui_IDPanel, "ID:", 4, 3,
+        ui_IDLabel = create_label(ui_IDPanel, "P/S:", 4, 3,
                                   lv_color_hex(0x00FFFF), &lv_font_montserrat_12);
 
-        ui_IDValue = create_label(ui_IDPanel, "1", 35, 2,
+        ui_IDValue = create_label(ui_IDPanel, "P01 S01", 45, 2,
                                   lv_color_hex(0xFFFFFF), &lv_font_montserrat_16);
 
         // Progress Panel
@@ -145,7 +145,7 @@ extern "C"
         ui_ProgressLabel = create_label(ui_ProgressPanel, "MAU:", 4, 3,
                                         lv_color_hex(0xFFFF00), &lv_font_montserrat_12);
 
-        ui_ProgressValue = create_label(ui_ProgressPanel, "0/5", 50, 2,
+        ui_ProgressValue = create_label(ui_ProgressPanel, "0/6", 50, 2,
                                         lv_color_hex(0xFFFFFF), &lv_font_montserrat_16);
 
         // ===== DATA PANELS (3 columns) =====
@@ -210,16 +210,16 @@ extern "C"
         lv_obj_set_style_border_width(ui_FooterPanel, 1, 0);
         lv_obj_set_style_border_color(ui_FooterPanel, lv_color_hex(0x4208), 0);
 
-        ui_InstructionLabel1 = create_label(ui_FooterPanel, "[ENTER] Lay mau & Gui MQTT", 5, 5,
+        ui_InstructionLabel1 = create_label(ui_FooterPanel, "[ENTER] Lay mau / Gui", 5, 5,
                                             lv_color_hex(0xFFFF00), &lv_font_montserrat_12);
 
-        ui_InstructionLabel2 = create_label(ui_FooterPanel, "[LEFT] ID-  [RIGHT] ID+  (Hold LEFT: Back)", 5, 23,
+        ui_InstructionLabel2 = create_label(ui_FooterPanel, "[LEFT/RIGHT] Doi nguoi  [UP] Doi session", 5, 23,
                                             lv_color_hex(0x9CF3), &lv_font_montserrat_10);
 
-        ui_InstructionLabel3 = create_label(ui_FooterPanel, "[DOWN] Reset mau", 5, 38,
+        ui_InstructionLabel3 = create_label(ui_FooterPanel, "[DOWN] Reset trial  Hold LEFT: Back", 5, 38,
                                             lv_color_hex(0x9CF3), &lv_font_montserrat_10);
 
-        lv_obj_t *ui_InfoLabel = create_label(ui_FooterPanel, "Khoang cach 20-30mm roi bam ENTER", 5, 55,
+        lv_obj_t *ui_InfoLabel = create_label(ui_FooterPanel, "Giua tran | MLX cach tran 40-50mm | 6 trial/session", 5, 55,
                                               lv_color_hex(0x6B6B), &lv_font_montserrat_10);
 
         // ===== POPUP (HIDDEN) - Professional Design =====
@@ -301,8 +301,15 @@ extern "C"
 
     void ui_datacollector_update_id(int id)
     {
-        static char buf[8];
-        snprintf(buf, sizeof(buf), "%d", id);
+        static char buf[12];
+        snprintf(buf, sizeof(buf), "P%02d", id);
+        lv_label_set_text(ui_IDValue, buf);
+    }
+
+    void ui_datacollector_update_session(int personId, int sessionId)
+    {
+        static char buf[16];
+        snprintf(buf, sizeof(buf), "P%02d S%02d", personId, sessionId);
         lv_label_set_text(ui_IDValue, buf);
     }
 

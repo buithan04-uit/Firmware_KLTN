@@ -39,6 +39,7 @@ bool ui_consume_mqtt_send_toggle_request();
 bool ui_consume_collect_take_request();
 bool ui_consume_collect_id_minus_request();
 bool ui_consume_collect_id_plus_request();
+bool ui_consume_collect_session_plus_request();
 bool ui_consume_collect_reset_request();
 bool ui_consume_measure_all_start_request();
 void ui_set_wifi_connect_feedback(const char *msg, uint32_t colorHex);
@@ -51,6 +52,7 @@ void ui_update_measure_all_ecg_waveform(int waveformY200, bool leadsOn);
 void ui_set_measure_all_send_state(uint8_t state);
 void ui_update_measureall_ecg(float ecg_mv, bool leads_connected);
 void ui_set_battery(uint8_t percent, bool charging, bool full = false);
+
 // 0=IDLE  1=SENDING  2=OK  3=FAIL  4=NO_WIFI
 
 #endif

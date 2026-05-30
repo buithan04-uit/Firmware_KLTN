@@ -37,15 +37,21 @@ static constexpr uint32_t MQTT_OK_LOG_INTERVAL_MS = 1500;
 static constexpr uint8_t TP5100_CHRG_PIN = 34; // TLP521-2 output CHRG, active LOW
 static constexpr uint8_t TP5100_FULL_PIN = 35; // TLP521-2 output STDBY/FULL, active LOW
 static constexpr size_t MQTT_PAYLOAD_BUFFER = 384;
-static constexpr uint8_t COLLECT_SAMPLE_LIMIT = 5;
+static constexpr uint8_t COLLECT_SAMPLE_LIMIT = 6;
+static constexpr uint8_t COLLECT_PERSON_MAX = 7;
+static constexpr uint8_t COLLECT_SESSION_MAX = 5;
 static constexpr int COLLECT_MEASUREMENT_SAMPLES = 30;
-static constexpr float COLLECT_DIST_MIN_MM = 38.0f;
-static constexpr float COLLECT_DIST_MAX_MM = 48.0f;
+
+static constexpr float COLLECT_DIST_MIN_MM = 40.0f;
+static constexpr float COLLECT_DIST_MAX_MM = 50.0f;
+static constexpr float COLLECT_DIST_TARGET_MM = 45.0f;
+
 static constexpr float COLLECT_AMBIENT_MIN_C = 20.0f;
 static constexpr float COLLECT_AMBIENT_MAX_C = 35.0f;
 static constexpr float COLLECT_BODY_MIN_C = 32.0f;
 static constexpr float COLLECT_BODY_MAX_C = 42.0f;
-static constexpr float COLLECT_DIST_OFFSET_MM = -18.0f; // Hardware offset: subtract 18mm
+
+static constexpr float VL53_TO_MLX_OFFSET_MM = 18.0f;
 static LcdSensorRuntime sensorRuntime;
 static WifiConfigManager wifiConfigManager;
 static TaskHandle_t ecgSamplingTaskHandle = nullptr;
@@ -69,6 +75,7 @@ static Adafruit_VL53L0X collectLox;
 static bool collectLoxReady = false;
 static bool collectIsMeasuring = false;
 static int collectCurrentId = 1;
+static int collectCurrentSession = 1;
 static int collectSampleCount = 0;
 static unsigned long collectLastLiveUpdate = 0;
 static float collectLastDistance = 999.0f;
@@ -76,6 +83,9 @@ static bool collectPendingSend = false;
 static float collectPendingDist = 0.0f;
 static float collectPendingObj = 0.0f;
 static float collectPendingAmb = 0.0f;
+static int collectPendingPerson = 1;
+static int collectPendingSession = 1;
+static int collectPendingTrial = 1;
 static bool measureAllPendingSend = false;
 static float measureAllPendingDist = 0.0f;
 static float measureAllPendingObj = 0.0f;
@@ -618,6 +628,51 @@ void print_heap()
     Serial.println(ESP.getMinFreeHeap());
 }
 
+static String collect_session_id(int personId, int sessionId)
+{
+    char buf[16];
+    snprintf(buf, sizeof(buf), "P%02d_S%02d", personId, sessionId);
+    return String(buf);
+}
+
+static String collect_person_id_text(int personId)
+{
+    char buf[8];
+    snprintf(buf, sizeof(buf), "P%02d", personId);
+    return String(buf);
+}
+
+static const char *collect_trial_phase(int trial)
+{
+    return (trial <= 3) ? "pre_omron" : "post_omron";
+}
+
+static const char *collect_distance_band(float distMm)
+{
+    if (!isfinite(distMm) || distMm >= 999.0f)
+    {
+        return "invalid";
+    }
+
+    if (distMm < 43.0f)
+    {
+        return "40_42";
+    }
+
+    if (distMm <= 47.0f)
+    {
+        return "44_46";
+    }
+
+    return "48_50";
+}
+
+static void collect_refresh_subject_ui()
+{
+    ui_datacollector_update_session(collectCurrentId, collectCurrentSession);
+    ui_datacollector_update_progress(collectSampleCount, COLLECT_SAMPLE_LIMIT);
+}
+
 static float collectMedBuf[3] = {0.0f, 0.0f, 0.0f};
 static int collectMedIdx = 0;
 static bool collectMedFilled = false;
@@ -807,6 +862,23 @@ static bool collect_read_raw_distance(uint16_t &raw)
     return true;
 }
 
+static float collect_mlx_target_distance(float vl53CorrectedDist)
+{
+    if (!isfinite(vl53CorrectedDist) || vl53CorrectedDist >= 999.0f)
+    {
+        return 999.0f;
+    }
+
+    float mlxDist = vl53CorrectedDist - VL53_TO_MLX_OFFSET_MM;
+
+    if (mlxDist < 0.0f)
+    {
+        mlxDist = 0.0f;
+    }
+
+    return mlxDist;
+}
+
 static float collect_live_distance()
 {
     uint16_t raw = 0;
@@ -815,8 +887,10 @@ static float collect_live_distance()
         return 999.0f;
     }
 
-    float calibrated = collect_corrected_distance(static_cast<float>(raw));
-    return collect_ema(calibrated);
+    const float vl53Dist = collect_corrected_distance(static_cast<float>(raw));
+    const float mlxDist = collect_mlx_target_distance(vl53Dist);
+
+    return collect_ema(mlxDist);
 }
 
 static void collect_perform_measurement(const WifiConfigManager &wifi)
@@ -882,13 +956,14 @@ static void collect_perform_measurement(const WifiConfigManager &wifi)
 
         if (valid)
         {
-            float correctedDist = collect_corrected_distance(static_cast<float>(measure.RangeMilliMeter));
+            float vl53Dist = collect_corrected_distance(static_cast<float>(measure.RangeMilliMeter));
+            float mlxDist = collect_mlx_target_distance(vl53Dist);
             float objTemp = sensorRuntime.mlxBodyTempC();
             float ambTemp = sensorRuntime.mlxAmbientTempC();
 
-            if (collect_distance_valid(correctedDist) && collect_temp_valid(objTemp, ambTemp))
+            if (collect_distance_valid(mlxDist) && collect_temp_valid(objTemp, ambTemp))
             {
-                distSamples[count] = correctedDist;
+                distSamples[count] = mlxDist;
                 objSamples[count] = objTemp;
                 ambSamples[count] = ambTemp;
                 count++;
@@ -914,18 +989,24 @@ static void collect_perform_measurement(const WifiConfigManager &wifi)
     float avgO = collect_mean(objSamples, count);
     float avgA = collect_mean(ambSamples, count);
 
-    // Apply hardware offset to distance
-    avgD += COLLECT_DIST_OFFSET_MM;
-
     collectPendingSend = true;
     collectPendingDist = avgD;
     collectPendingObj = avgO;
     collectPendingAmb = avgA;
+    collectPendingPerson = collectCurrentId;
+    collectPendingSession = collectCurrentSession;
+    collectPendingTrial = collectSampleCount + 1;
 
-    char msg[128];
+    char msg[160];
     snprintf(msg, sizeof(msg),
-             "Dist: %.0f mm\nObj:  %.2f C\nAmb:  %.2f C\nENTER = Send | DOWN = Cancel",
-             avgD, avgO, avgA);
+             "P%02d S%02d T%d/%d\nDist: %.0f mm Obj: %.2f C\nAmb: %.2f C\nENTER=Send | DOWN=Cancel",
+             collectPendingPerson,
+             collectPendingSession,
+             collectPendingTrial,
+             COLLECT_SAMPLE_LIMIT,
+             avgD,
+             avgO,
+             avgA);
     ui_datacollector_show_popup("RESULT - CONFIRM SEND!", msg,
                                 lv_palette_main(LV_PALETTE_GREEN), false);
     collectIsMeasuring = false;
@@ -960,13 +1041,8 @@ static void measure_all_prepare()
     uint16_t raw = 0;
     if (collect_read_raw_distance(raw))
     {
-        distMm = collect_corrected_distance(static_cast<float>(raw));
-    }
-
-    // Apply hardware offset (subtract 18mm)
-    if (distMm < 999.0f)
-    {
-        distMm += COLLECT_DIST_OFFSET_MM;
+        const float vl53Dist = collect_corrected_distance(static_cast<float>(raw));
+        distMm = collect_mlx_target_distance(vl53Dist);
     }
 
     float objTemp = sensorRuntime.mlxReady() ? sensorRuntime.mlxBodyTempC() : -1.0f;
@@ -1230,8 +1306,7 @@ void guiTask(void *pvParameters)
                 Serial.println("[COLLECT] Entered collect data screen.");
                 collectIsMeasuring = false;
                 collect_ensure_lox_ready();
-                ui_datacollector_update_id(collectCurrentId);
-                ui_datacollector_update_progress(collectSampleCount, COLLECT_SAMPLE_LIMIT);
+                collect_refresh_subject_ui();
                 refresh_collect_wifi_ui(wifiConfigManager);
             }
             else if (current_screen_type == SCR_MEASUREALL)
@@ -1437,12 +1512,27 @@ void guiTask(void *pvParameters)
                             WiFiClientSecure secure;
                             secure.setInsecure();
                             HTTPClient http;
+                            const String personText = collect_person_id_text(collectPendingPerson);
+                            const String sessionText = collect_session_id(collectPendingPerson, collectPendingSession);
+
                             String url = GOOGLE_SCRIPT_URL +
-                                         "?id=" + String(collectCurrentId) +
+                                         "?id=" + String(collectPendingPerson) +
+                                         "&person=" + personText +
+                                         "&session=" + sessionText +
+                                         "&session_index=" + String(collectPendingSession) +
+                                         "&trial=" + String(collectPendingTrial) +
+                                         "&phase=" + String(collect_trial_phase(collectPendingTrial)) +
                                          "&obj=" + String(collectPendingObj, 2) +
                                          "&amb=" + String(collectPendingAmb, 2) +
                                          "&dist=" + String(collectPendingDist, 1) +
-                                         "&omron=";
+                                         "&distance_band=" + String(collect_distance_band(collectPendingDist)) +
+                                         "&omron=" +
+                                         "&site=axillary" +
+                                         "&position=forehead_center" +
+                                         "&quality=A" +
+                                         "&note=normal" +
+                                         "&uptime=" + String(millis() / 1000) +
+                                         "&protocol=KLTN_MLX_DCI_AX_V1";
 
                             if (http.begin(secure, url))
                             {
@@ -1508,24 +1598,50 @@ void guiTask(void *pvParameters)
                     if (collectCurrentId > 1)
                     {
                         collectCurrentId--;
-                        collectSampleCount = 0;
-                        ui_datacollector_update_id(collectCurrentId);
-                        ui_datacollector_update_progress(collectSampleCount, COLLECT_SAMPLE_LIMIT);
                     }
+                    else
+                    {
+                        collectCurrentId = COLLECT_PERSON_MAX;
+                    }
+
+                    collectSampleCount = 0;
+                    collect_refresh_subject_ui();
                 }
 
                 if (ui_consume_collect_id_plus_request())
                 {
-                    collectCurrentId++;
+                    if (collectCurrentId < COLLECT_PERSON_MAX)
+                    {
+                        collectCurrentId++;
+                    }
+                    else
+                    {
+                        collectCurrentId = 1;
+                    }
+
                     collectSampleCount = 0;
-                    ui_datacollector_update_id(collectCurrentId);
-                    ui_datacollector_update_progress(collectSampleCount, COLLECT_SAMPLE_LIMIT);
+                    collect_refresh_subject_ui();
+                }
+
+                if (ui_consume_collect_session_plus_request())
+                {
+                    if (collectCurrentSession < COLLECT_SESSION_MAX)
+                    {
+                        collectCurrentSession++;
+                    }
+                    else
+                    {
+                        collectCurrentSession = 1;
+                    }
+
+                    collectSampleCount = 0;
+                    collect_refresh_subject_ui();
                 }
 
                 if (ui_consume_collect_reset_request())
                 {
                     collectSampleCount = 0;
-                    ui_datacollector_update_progress(collectSampleCount, COLLECT_SAMPLE_LIMIT);
+                    collect_refresh_subject_ui();
                 }
 
                 if (ui_consume_collect_take_request())
@@ -1538,12 +1654,7 @@ void guiTask(void *pvParameters)
                     collectLastLiveUpdate = millis();
                     collectLastDistance = collect_live_distance();
 
-                    // Apply hardware offset (subtract 18mm) for display
                     float displayDistance = collectLastDistance;
-                    if (displayDistance < 999.0f)
-                    {
-                        displayDistance += COLLECT_DIST_OFFSET_MM;
-                    }
 
                     float liveTemp = sensorRuntime.mlxReady() ? sensorRuntime.mlxBodyTempC() : -1.0f;
                     float liveAmb = sensorRuntime.mlxConnected() ? sensorRuntime.mlxAmbientTempC() : -999.0f;
@@ -1565,10 +1676,6 @@ void guiTask(void *pvParameters)
                 collectLastDistance = collect_live_distance();
 
                 float displayDist = collectLastDistance;
-                if (displayDist < 999.0f)
-                {
-                    displayDist += COLLECT_DIST_OFFSET_MM;
-                }
 
                 // Cập nhật latestEcgLive/latestEcgSample để publishTelemetryIfReady dùng
                 latestEcgLive = ecgLive;
@@ -1608,10 +1715,6 @@ void guiTask(void *pvParameters)
                             if (collect_ensure_lox_ready())
                             {
                                 distMm = collect_live_distance();
-                                if (distMm < 999.0f)
-                                {
-                                    distMm += COLLECT_DIST_OFFSET_MM;
-                                }
                             }
                             ui_set_temp_distance(distMm);
                         }
