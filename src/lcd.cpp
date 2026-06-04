@@ -1328,21 +1328,43 @@ void guiTask(void *pvParameters)
 
             const SensorSnapshot e = sensorRuntime.ecgSnapshot();
             const bool ecgLive = sensorRuntime.ad8232Ready() && e.sensorReady && e.signalReady;
-            const float filtered = getECGFilteredSignal();
             latestEcgLive = ecgLive;
-            latestEcgSample = filtered;
-            ui_update_ecg_live(filtered, e.heartRateBpm, ecgLive);
 
-            if (ecgLive && (millis() - lastEcgLiveLog >= ECG_LOG_INTERVAL_MS))
+            if (!ecgLive)
             {
-                Serial.print("[ECG] Raw=");
-                Serial.print(getECGRawSignal(), 2);
-                Serial.print(",Filtered=");
-                Serial.print(filtered, 2);
-                Serial.print(",HR=");
-                Serial.println(e.heartRateBpm);
-                lastEcgLiveLog = millis();
+                latestEcgSample = 0.0f;
+                ui_update_ecg_live(100.0f, 0, false); // đường phẳng giữa khi leads off
             }
+            else
+            {
+                // Dùng filteredSignal: đã qua HPF+LPF+notch trong ad8232.cpp
+                // Output là tín hiệu AC thuần (DC đã bị HPF loại), đơn vị mV
+                const float filt = getECGFilteredSignal();
+
+                // Kiểm tra mẫu mới để tránh vẽ lại khi I2C stall
+                static float lastDrawFilt = -99999.0f;
+                if (filt == lastDrawFilt)
+                {
+                    goto ecg_ui_done; // không có mẫu mới, bỏ qua frame này
+                }
+                lastDrawFilt = filt;
+                latestEcgSample = filt;
+
+                // FIX: KHÔNG normalize ecgEnvelope ở đây nữa.
+                // Trước đây lcd.cpp normalize filt→chartY rồi ui.cpp lại envelope+normalize lần 2.
+                // Double-normalize làm xẹp đỉnh QRS nghiêm trọng.
+                // Bây giờ: pass thẳng filt (mV) vào ui_update_ecg_live, để ui.cpp xử lý 1 lần duy nhất.
+                ui_update_ecg_live(filt, e.heartRateBpm, true);
+
+                if (millis() - lastEcgLiveLog >= ECG_LOG_INTERVAL_MS)
+                {
+                    lastEcgLiveLog = millis();
+                    // Log filt trực tiếp để debug; chartY do ui.cpp tính
+                    Serial.printf("[ECG] Raw=%.2f Filt=%.2f HR=%d\n",
+                                  getECGRawSignal(), filt, e.heartRateBpm);
+                }
+            }
+        ecg_ui_done:;
         }
 
         static unsigned long lastUpdate = 0;

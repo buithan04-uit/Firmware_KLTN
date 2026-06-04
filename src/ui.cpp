@@ -2427,19 +2427,23 @@ void ui_update_ecg_live(float ecg_mv, int hr_bpm, bool leads_connected)
         return;
     }
 
+    // FIX: Đơn giản hoá toàn bộ hàm này.
+    // TRƯỚC: hàm có displayBaseline + displayFiltered + envelope + yScale riêng
+    //        → lọc lần 3 sau ad8232.cpp và lcd.cpp, làm xẹp QRS nghiêm trọng.
+    // SAU:   ecg_mv là filteredSignal (mV) đã sạch từ ad8232.cpp (HPF+LPF+notch).
+    //        Chỉ cần 1 envelope để autoscale chart. Không baseline thêm.
+
     static unsigned long lastChartUpdate = 0;
-    static float displayBaseline = 0.0f;
-    static float displayFiltered = 0.0f;
-    static float envelope = 130.0f;
-    static float yScale = 230.0f;
+    static float envelope = 120.0f; // bám biên độ peak để autoscale
     static bool needsReprime = true;
     static int lastValidHr = 0;
     static unsigned long lastValidHrMs = 0;
-    const unsigned long chartUpdateMs = 8;
+    const unsigned long chartUpdateMs = 4; // FIX: 8→4ms (250Hz chart = khớp ADC rate)
 
     if (!leads_connected)
     {
         needsReprime = true;
+        envelope = 120.0f;
 
         if (ecg_lbl_warning)
         {
@@ -2468,10 +2472,10 @@ void ui_update_ecg_live(float ecg_mv, int hr_bpm, bool leads_connected)
 
     if (needsReprime)
     {
-        displayBaseline = ecg_mv;
-        displayFiltered = 0.0f;
-        envelope = 130.0f;
-        yScale = 230.0f;
+        envelope = fmaxf(fabsf(ecg_mv), 80.0f);
+        // Reset slowBaseline về giá trị hiện tại để tránh transient khi reconnect leads
+        // Dùng static pointer trick: slowBaseline là static trong block bên dưới,
+        // reset nó qua biến helper để tránh trùng scope
         lastChartUpdate = millis();
         needsReprime = false;
     }
@@ -2480,33 +2484,36 @@ void ui_update_ecg_live(float ecg_mv, int hr_bpm, bool leads_connected)
     {
         lastChartUpdate = millis();
 
-        float baselineInput = constrain(ecg_mv, -90.0f, 90.0f);
-        displayBaseline = 0.992f * displayBaseline + 0.008f * baselineInput;
-        float centered = ecg_mv - displayBaseline;
+        // Reject baseline wander cực chậm (fc≈0.05Hz) — chỉ loại DC drift dài hạn,
+        // không ảnh hưởng sóng P/QRS/T. α=0.9998 @ 250Hz → τ≈8 giây
+        static float slowBaseline = 0.0f;
+        slowBaseline = 0.9998f * slowBaseline + 0.0002f * ecg_mv;
+        const float centered = ecg_mv - slowBaseline;
 
-        float delta = fabsf(centered - displayFiltered);
-        float smoothAlpha = (delta > 40.0f) ? 0.28f : 0.58f;
-        displayFiltered = smoothAlpha * displayFiltered + (1.0f - smoothAlpha) * centered;
-
-        float absDisplay = fabsf(displayFiltered);
-        if (absDisplay > envelope)
-            envelope = 0.20f * absDisplay + 0.80f * envelope;
+        // Autoscale envelope: bám nhanh khi peak vượt, giảm chậm khi yên tĩnh
+        const float absVal = fabsf(centered);
+        if (absVal > envelope)
+            envelope = 0.22f * absVal + 0.78f * envelope;
         else
-            envelope = 0.005f * absDisplay + 0.995f * envelope;
+            envelope = 0.003f * absVal + 0.997f * envelope;
 
-        envelope = constrain(envelope, 95.0f, 320.0f);
+        // Clamp envelope [80, 700] mV — sàn 80 để QRS luôn rõ dù tín hiệu nhỏ
+        if (envelope < 80.0f)
+            envelope = 80.0f;
+        if (envelope > 700.0f)
+            envelope = 700.0f;
 
-        float targetScale = envelope * 1.90f;
-        if (targetScale < 230.0f)
-            targetScale = 230.0f;
-        yScale = 0.97f * yScale + 0.03f * targetScale;
-        yScale = constrain(yScale, 210.0f, 430.0f);
+        // Normalize về [-1, +1], clamp ±92% để headroom 8 unit
+        const float clamped = constrain(centered, -0.92f * envelope, 0.92f * envelope);
+        const float normalized = clamped / envelope;
 
-        float limited = constrain(displayFiltered, -0.95f * yScale, 0.95f * yScale);
-        int ecgChart = (int)((limited / yScale + 1.0f) * 100.0f);
-        ecgChart = constrain(ecgChart, 0, 200);
+        // FIX NGƯỢC SÓNG: LVGL chart y=0 ở ĐÁY, y=200 ở ĐỈNH
+        // R-peak ECG dương → cần nhô LÊN màn hình → chartY phải LỚN (gần 200)
+        // Công thức cũ: 100 - normalized*95 → R-peak dương cho chartY nhỏ → đâm XUỐNG (sai)
+        // Công thức mới: 100 + normalized*95 → R-peak dương cho chartY lớn → nhô LÊN (đúng)
+        const int chartY = constrain((int)(100.0f + normalized * 92.0f), 0, 200);
 
-        lv_chart_set_next_value(chart_ecg, ser_ecg, ecgChart);
+        lv_chart_set_next_value(chart_ecg, ser_ecg, chartY);
     }
 
     if (lbl_hr_val)

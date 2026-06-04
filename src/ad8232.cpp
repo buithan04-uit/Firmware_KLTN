@@ -52,10 +52,14 @@
 #define HPF_ALPHA 0.983f // fc ≈ 0.7Hz tại 250Hz, giảm baseline wander tốt hơn
 
 // Smart LPF: mượt khi nền phẳng, giảm lọc khi qua QRS để giữ chi tiết
-#define LPF_ALPHA_QUIET 0.90f
+// FIX2: α_quiet=0.82 (cutoff≈7Hz) giữ đủ chi tiết sóng P/T; α_QRS=0.55 cho QRS peak
+// LPF_ALPHA_QRS không nên quá thấp (<0.50) vì sẽ bypass filter → spike passthrough
+#define LPF_ALPHA_QUIET 0.82f
 #define LPF_ALPHA_QRS 0.55f
-#define QRS_SLOPE_THRESHOLD_MV 22.0f
-#define DISPLAY_BASELINE_ALPHA 0.997f
+#define QRS_SLOPE_THRESHOLD_MV 25.0f
+// Spike gate: giới hạn bước nhảy của filteredSignal để ngăn transient HPF gây spike
+// QRS thực tế tăng ~200-400mV trong 1 mẫu (4ms). Artefact có thể >800mV/sample
+#define FILT_MAX_STEP_MV 450.0f
 
 // 50Hz notch @ Fs=250Hz (biquad, Q~10) để giảm nhiễu điện lưới
 #define NOTCH_B0 0.95459f
@@ -65,18 +69,19 @@
 #define NOTCH_A2 0.90919f
 
 // Nhánh HR riêng: lọc nhẹ để giảm false peak nhưng vẫn giữ QRS
-#define HR_LPF_ALPHA 0.72f
+// FIX: 0.72→0.55, cutoff ~34Hz tại 250Hz, peak QRS rõ hơn cho detector
+#define HR_LPF_ALPHA 0.55f
 
 // ==========================================
 // PHÁT HIỆN NHỊP TIM (R-R Interval)
 // ==========================================
-#define HR_REFRACTORY_MS 430 // Min 430ms giữa 2 nhịp (~139 BPM max), giảm double count
-#define HR_TIMEOUT_MS 4500   // Timeout 4.5s để tránh mất BPM khi tín hiệu yếu ngắn hạn
-#define HR_MIN_BPM 45
-#define HR_MAX_BPM 130
-#define HR_STARTUP_BLANK_MS 850
-#define HR_RR_BUFFER 8 // Số R-R intervals để tính trung bình
-#define HR_BPM_LP_ALPHA 0.68f
+#define HR_REFRACTORY_MS 380 // 380ms → tối đa ~158 BPM, giảm miss-peak khi HR cao
+#define HR_TIMEOUT_MS 5000   // 5s timeout, ổn định hơn khi tín hiệu yếu ngắn hạn
+#define HR_MIN_BPM 40
+#define HR_MAX_BPM 150
+#define HR_STARTUP_BLANK_MS 600 // FIX: rút ngắn 850→600ms để bắt nhịp sớm hơn
+#define HR_RR_BUFFER 6          // FIX: 8→6, ổn định hơn với ít nhịp ban đầu
+#define HR_BPM_LP_ALPHA 0.60f   // FIX: 0.68→0.60, phản hồi nhanh hơn
 
 // ==========================================
 // BIẾN TOÀN CỤC
@@ -126,7 +131,8 @@ bool leadsConnected = false;
 float rawSignal = 0;
 float filteredSignal = 0;
 float hrInputSignal = 0;
-float displayBaseline = 0;
+// FIX: displayBaseline đã bị xoá — baseline drift xử lý DUY NHẤT bởi HPF (fc≈0.7Hz)
+// Không còn subtract baseline thêm ở ad8232.cpp hay ui.cpp nữa.
 bool adsAvailable = false;
 
 // ==========================================
@@ -138,9 +144,10 @@ void initAD8232()
     pinMode(LO_PLUS_PIN, INPUT_PULLDOWN);
     pinMode(LO_MINUS_PIN, INPUT_PULLDOWN);
 
-    // 400kHz là tốc độ chuẩn Fast-mode I2C, ADS1115 hỗ trợ tối đa 400kHz
+    // 100kHz Standard-mode: ổn định hơn với dây dài (>20cm), tránh Wire Error 263
     Wire1.begin(I2C_SDA, I2C_SCL);
-    Wire1.setClock(400000);
+    Wire1.setClock(100000);
+    Wire1.setTimeOut(50); // timeout 50ms, tránh block lâu khi bus bị treo
     delay(50);
 
     // Retry 3 lần để đảm bảo ADS1115 kịp khởi động (một số board cần thêm thời gian)
@@ -175,62 +182,23 @@ void initAD8232()
 
     adsAvailable = true;
 
-    // Cấu hình ADS1115
-    // Dùng GAIN_ONE để bao trọn dải 0-3.3V của AD8232, tránh clipping đỉnh R
+    // 250 SPS: conversion time 4ms, đủ cho 250Hz sampling, ít lỗi I2C hơn 475SPS
+    // startContinuous: ADS1115 tự chuyển đổi liên tục, đọc bằng getLastConversionResults()
+    // giúp tránh lỗi "kết quả cũ" khi đọc quá nhanh so với conversion time
     ads.setGain(GAIN_ONE);                // ±4.096V range
-    ads.setDataRate(RATE_ADS1115_475SPS); // 475 SPS ổn định nhiễu hơn cho ECG
+    ads.setDataRate(RATE_ADS1115_250SPS); // 250 SPS, conversion time ~4ms
+    ads.startADCReading(ADS1X15_REG_CONFIG_MUX_SINGLE_0, /*continuous=*/true);
 
     Serial.println("⚙️  ADS1115 Config:");
     Serial.println("   - Gain: ±4.096V (0.125 mV/bit)");
-    Serial.println("   - Rate: 475 SPS");
-
+    Serial.println("   - Rate: 250 SPS (continuous mode A0)");
     Serial.println("✓ ADS1115 khởi tạo thành công");
+    Serial.println("  Continuous mode on A0, đang lấy mẫu...");
 
-    // TEST ADS1115 - Đọc tất cả các kênh
-    Serial.println();
-    Serial.println("🔍 TESTING ADS1115 - Đọc tất cả kênh:");
-    delay(100);
-
-    int16_t adc0 = ads.readADC_SingleEnded(0);
-    delay(10);
-    int16_t adc1 = ads.readADC_SingleEnded(1);
-    delay(10);
-    int16_t adc2 = ads.readADC_SingleEnded(2);
-    delay(10);
-    int16_t adc3 = ads.readADC_SingleEnded(3);
-
-    Serial.print("   A0: ");
-    Serial.print(adc0);
-    Serial.print(" (");
-    Serial.print(adc0 * ADC_MV_PER_BIT);
-    Serial.println(" mV)");
-    Serial.print("   A1: ");
-    Serial.print(adc1);
-    Serial.print(" (");
-    Serial.print(adc1 * ADC_MV_PER_BIT);
-    Serial.println(" mV)");
-    Serial.print("   A2: ");
-    Serial.print(adc2);
-    Serial.print(" (");
-    Serial.print(adc2 * ADC_MV_PER_BIT);
-    Serial.println(" mV)");
-    Serial.print("   A3: ");
-    Serial.print(adc3);
-    Serial.print(" (");
-    Serial.print(adc3 * ADC_MV_PER_BIT);
-    Serial.println(" mV)");
-
-    Serial.println();
-    Serial.println("⚠️  Nếu A0 = 0 nhưng OUTPUT AD8232 ~1.5V:");
-    Serial.println("   1. Thử nối OUTPUT vào A1/A2/A3 xem kênh nào hoạt động");
-    Serial.println("   2. Hoặc ADS1115 kênh A0 bị hỏng");
-    Serial.println();
-
-    // Pre-fill filter buffers với giá trị ADC đầu tiên
-    // Tránh HPF transient khi buffer chuyển từ 0 → 1650mV
-    float initMV = adc0 * ADC_MV_PER_BIT;
-    if (adc0 <= 0 || adc0 >= ADC_MAX_VALID)
-        initMV = 1650.0; // Fallback nếu đọc lỗi
+    // Pre-fill filter buffers với giá trị ADC đầu tiên đọc từ continuous mode
+    delay(10); // Chờ 1 conversion (4ms @ 250SPS)
+    int16_t adc0 = ads.getLastConversionResults();
+    float initMV = (adc0 > 2000 && adc0 < 32000) ? (adc0 * ADC_MV_PER_BIT) : 1650.0f;
 
     for (int i = 0; i < MOVING_AVG_SIZE; i++)
     {
@@ -246,7 +214,7 @@ void initAD8232()
     hpfPrevOutput = 0;
     lpfPrevOutput = 0; // LPF chạy sau HPF nên preload ở 0 để không tạo bước nhảy giả
     hrLpfPrevOutput = 0;
-    displayBaseline = 0;
+    // FIX: displayBaseline đã bị xoá, không cần init nữa
     notch_x1 = initMV;
     notch_x2 = initMV;
     notch_y1 = initMV;
@@ -401,12 +369,11 @@ bool checkLeadsConnected()
 // ==========================================
 void readAndFilterECG()
 {
-    static int16_t lastGoodADCValue = 13200; // ~1650mV baseline at GAIN_ONE
-    static float lastRawMv = 1650.0f;
     static uint8_t invalidStreak = 0;
     static uint8_t hardFailStreak = 0;
     static unsigned long readBackoffUntilMs = 0;
     static unsigned long lastBusRecoveryAtMs = 0;
+    static float lastRawMv = 1650.0f;
 
     if (!adsAvailable)
     {
@@ -422,7 +389,6 @@ void readAndFilterECG()
 
     if (!leadsConnected)
     {
-        // Nếu dây bị tuột, reset các giá trị
         rawSignal = 0;
         filteredSignal = 0;
         heartRate = 0;
@@ -437,7 +403,6 @@ void readAndFilterECG()
         lastRPeakTime = 0;
         beatDetected = false;
 
-        // Cảnh báo (mỗi 2s để tránh spam)
         static unsigned long lastWarning = 0;
         if (millis() - lastWarning >= 5000)
         {
@@ -447,63 +412,68 @@ void readAndFilterECG()
         return;
     }
 
-    int16_t adcValue = lastGoodADCValue;
-
-    // Back off briefly after bursts of invalid reads to avoid flooding Wire errors.
-    if (millis() >= readBackoffUntilMs)
+    // Back off sau nhiều lần lỗi liên tiếp
+    if (millis() < readBackoffUntilMs)
     {
-        adcValue = ads.readADC_SingleEnded(0);
+        return; // Không nhét mẫu cũ, bỏ qua hoàn toàn frame này
     }
 
-    // Validate: AD8232 OUTPUT ~1.5V → ADC phải > 0 và < 32767
-    // Nếu trả về 0 hoặc 32767 → lỗi I2C/overflow, dùng giá trị tốt cuối cùng
-    if (adcValue >= ADC_MIN_VALID && adcValue < ADC_MAX_VALID)
+    // Đọc kết quả conversion cuối (continuous mode, không trigger mới → không block)
+    int16_t adcValue = ads.getLastConversionResults();
+
+    // Validate: output LM324 quanh 1.5-1.8V → ADC value hợp lệ ~12000-14400
+    // Cho phép rộng hơn: 500 mV (4000) đến 3.8V (30400) để bắt QRS đỉnh
+    const int16_t ADC_VALID_LOW = 2000;   // ~250 mV
+    const int16_t ADC_VALID_HIGH = 32000; // ~4.0V, dưới clip
+    if (adcValue < ADC_VALID_LOW || adcValue >= ADC_VALID_HIGH)
     {
-        lastGoodADCValue = adcValue;
-        invalidStreak = 0;
-        hardFailStreak = 0;
-    }
-    else
-    {
-        adcValue = lastGoodADCValue; // Dùng giá trị tốt gần nhất
-        if (invalidStreak < 255)
-            invalidStreak++;
-        if (hardFailStreak < 255)
-            hardFailStreak++;
+        // Mẫu không hợp lệ: KHÔNG dùng giá trị cũ, bỏ qua hoàn toàn
+        invalidStreak++;
+        hardFailStreak++;
 
         if (invalidStreak >= 3)
         {
-            readBackoffUntilMs = millis() + 30;
+            readBackoffUntilMs = millis() + 20; // backoff 20ms
             invalidStreak = 0;
         }
 
-        // Recover ADS bus if errors persist for long bursts.
-        if (hardFailStreak >= 25 && (millis() - lastBusRecoveryAtMs) >= 1200)
+        // Recover I2C bus nếu lỗi kéo dài
+        if (hardFailStreak >= 20 && (millis() - lastBusRecoveryAtMs) >= 1000)
         {
             lastBusRecoveryAtMs = millis();
+            Serial.println("[ECG] I2C bus recovery attempt...");
+            Wire1.end();
+            delay(10);
             Wire1.begin(I2C_SDA, I2C_SCL);
-            Wire1.setClock(400000);
-            if (ads.begin(0x48, &Wire1)) // Đổi adsI2C thành Wire1
+            Wire1.setClock(100000);
+            Wire1.setTimeOut(50);
+            if (ads.begin(0x48, &Wire1))
             {
                 ads.setGain(GAIN_ONE);
-                ads.setDataRate(RATE_ADS1115_475SPS);
+                ads.setDataRate(RATE_ADS1115_250SPS);
+                ads.startADCReading(ADS1X15_REG_CONFIG_MUX_SINGLE_0, /*continuous=*/true);
+                Serial.println("[ECG] I2C bus recovered.");
             }
             hardFailStreak = 0;
         }
+
+        // Không cập nhật rawSignal/filteredSignal → lcd.cpp sẽ detect newRawSample=false và skip
+        return;
     }
 
-    // Suppress impossible one-sample jumps (typically I2C/ADC glitches).
+    // Mẫu hợp lệ: reset streak
+    invalidStreak = 0;
+    hardFailStreak = 0;
+
     float rawMv = adcValue * ADC_MV_PER_BIT;
+
+    // Suppress spike: giới hạn bước nhảy 1 mẫu (giữ đặc trưng QRS nhưng loại glitch)
     float rawStep = rawMv - lastRawMv;
-    const float maxRawStepMv = 240.0f;
+    const float maxRawStepMv = 300.0f; // Nới rộng hơn để không cắt đỉnh QRS cao
     if (rawStep > maxRawStepMv)
-    {
         rawMv = lastRawMv + maxRawStepMv;
-    }
     else if (rawStep < -maxRawStepMv)
-    {
         rawMv = lastRawMv - maxRawStepMv;
-    }
     lastRawMv = rawMv;
     rawSignal = rawMv;
 
@@ -519,19 +489,22 @@ void readAndFilterECG()
     hrInputSignal = applyHeartRateLPF(ac);
     filteredSignal = applyLowPassFilter(ac);
 
-    // Loại bỏ trôi nền còn sót ở nhánh hiển thị để waveform ổn định hơn
-    displayBaseline = DISPLAY_BASELINE_ALPHA * displayBaseline + (1.0f - DISPLAY_BASELINE_ALPHA) * filteredSignal;
-    filteredSignal -= displayBaseline;
-
-    // Soft limiter: tránh clip cứng làm bẹt đỉnh QRS
-    float absVal = fabsf(filteredSignal);
-    if (absVal > 340.0f)
+    // Spike gate: giới hạn bước nhảy tối đa của filteredSignal
+    // Lý do: HPF tạo transient lớn khi có artefact (electrode pop, muscle noise).
+    // LPF_ALPHA_QRS=0.55 chưa đủ khử hết → spike lọt qua đến chart (1000+ mV).
+    // Gate này giữ lại đặc trưng QRS thực (≤450 mV/sample) nhưng chặn artefact đột ngột.
     {
-        float compressed = 340.0f + (absVal - 340.0f) * 0.18f;
-        if (compressed > 520.0f)
-            compressed = 520.0f;
-        filteredSignal = (filteredSignal >= 0.0f) ? compressed : -compressed;
+        static float prevFilt = 0.0f;
+        float step = filteredSignal - prevFilt;
+        if (step > FILT_MAX_STEP_MV)
+            filteredSignal = prevFilt + FILT_MAX_STEP_MV;
+        else if (step < -FILT_MAX_STEP_MV)
+            filteredSignal = prevFilt - FILT_MAX_STEP_MV;
+        prevFilt = filteredSignal;
     }
+
+    // FIX: XOÁ displayBaseline subtraction ở đây.
+    // Baseline drift đã được xử lý bởi HPF (fc≈0.7Hz) → đủ rồi, không cần subtract thêm.
 
     // Cập nhật thời gian nhận tín hiệu
     lastSignalTime = millis();
@@ -574,13 +547,15 @@ void detectHeartRate()
     derivBaseline = derivBaseline * 0.996f + absCurr * 0.004f;
     hrEnvelope = hrEnvelope * 0.994f + absCurr * 0.006f;
 
-    float thresholdByDeriv = derivBaseline * 1.75f;
-    float thresholdByEnv = hrEnvelope * 1.55f;
+    // FIX: Hạ threshold để bắt đỉnh thực tế sau LPF nới
+    // Trước: threshold=[9,95], quá rộng khi tín hiệu đã bị nhiều tầng lọc
+    float thresholdByDeriv = derivBaseline * 1.50f;
+    float thresholdByEnv = hrEnvelope * 1.35f;
     float threshold = fmaxf(thresholdByDeriv, thresholdByEnv);
-    if (threshold < 9.0f)
-        threshold = 9.0f;
-    if (threshold > 95.0f)
-        threshold = 95.0f;
+    if (threshold < 6.0f)
+        threshold = 6.0f;
+    if (threshold > 70.0f)
+        threshold = 70.0f;
 
     bool localPeak = (hrPrevAbs1 > hrPrevAbs2) && (hrPrevAbs1 > absCurr);
     float prominence = hrPrevAbs1 - fminf(hrPrevAbs2, absCurr);
