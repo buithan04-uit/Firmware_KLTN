@@ -74,6 +74,10 @@ static lv_obj_t *lbl_all_temp = NULL;
 static lv_obj_t *lbl_all_ecg = NULL;
 static lv_obj_t *lbl_all_dist = NULL;
 static lv_obj_t *lbl_all_status = NULL;
+static lv_obj_t *lbl_all_ecg_state = NULL;
+static lv_obj_t *lbl_all_ecg_quality = NULL;
+static lv_obj_t *lbl_all_ecg_amp = NULL;
+static lv_obj_t *all_ecg_beat_dot = NULL;
 static lv_obj_t *chart_ecg_mini = NULL;
 static lv_chart_series_t *ser_ecg_mini = NULL;
 
@@ -880,6 +884,10 @@ void clean_resources()
     lbl_all_ecg = NULL;
     lbl_all_dist = NULL;
     lbl_all_status = NULL;
+    lbl_all_ecg_state = NULL;
+    lbl_all_ecg_quality = NULL;
+    lbl_all_ecg_amp = NULL;
+    all_ecg_beat_dot = NULL;
 }
 
 void switch_to_obj(lv_obj_t *obj, ScreenType type)
@@ -1771,26 +1779,35 @@ void build_measureall()
     lv_obj_set_pos(ecg_box, LEFT_X, ECG_Y);
 
     lv_obj_t *ecg_label = lv_label_create(ecg_box);
-    lv_label_set_text(ecg_label, "ECG");
+    lv_label_set_text(ecg_label, "ECG DATA");
     lv_obj_set_style_text_color(ecg_label, lv_color_hex(0x444444), 0);
     lv_obj_set_style_text_font(ecg_label, &lv_font_montserrat_10, 0);
     lv_obj_align(ecg_label, LV_ALIGN_TOP_LEFT, 2, 1);
 
-    chart_ecg_mini = lv_chart_create(ecg_box);
-    lv_obj_set_size(chart_ecg_mini, ECG_W - 6, ECG_H - 6);
-    lv_obj_align(chart_ecg_mini, LV_ALIGN_CENTER, 0, 0);
-    lv_chart_set_type(chart_ecg_mini, LV_CHART_TYPE_LINE);
-    lv_chart_set_point_count(chart_ecg_mini, 120);
-    lv_chart_set_range(chart_ecg_mini, LV_CHART_AXIS_PRIMARY_Y, 0, 200);
-    lv_chart_set_update_mode(chart_ecg_mini, LV_CHART_UPDATE_MODE_CIRCULAR);
-    lv_obj_set_style_bg_color(chart_ecg_mini, lv_color_hex(0x000000), 0);
-    lv_obj_set_style_bg_opa(chart_ecg_mini, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(chart_ecg_mini, 0, 0);
-    lv_obj_set_style_size(chart_ecg_mini, 0, LV_PART_INDICATOR);
-    lv_obj_set_style_line_width(chart_ecg_mini, 2, LV_PART_ITEMS);
-    lv_obj_set_style_line_color(chart_ecg_mini, lv_color_hex(0x0a2010), LV_PART_MAIN);
-    lv_chart_set_div_line_count(chart_ecg_mini, 3, 6);
-    ser_ecg_mini = lv_chart_add_series(chart_ecg_mini, lv_color_hex(0x00E676), LV_CHART_AXIS_PRIMARY_Y);
+    all_ecg_beat_dot = lv_obj_create(ecg_box);
+    lv_obj_set_size(all_ecg_beat_dot, 12, 12);
+    lv_obj_set_style_radius(all_ecg_beat_dot, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(all_ecg_beat_dot, lv_color_hex(0x113322), 0);
+    lv_obj_set_style_border_width(all_ecg_beat_dot, 0, 0);
+    lv_obj_align(all_ecg_beat_dot, LV_ALIGN_CENTER, -94, -12);
+
+    lbl_all_ecg_state = lv_label_create(ecg_box);
+    lv_label_set_text(lbl_all_ecg_state, "ECG WAIT");
+    lv_obj_set_style_text_font(lbl_all_ecg_state, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_color(lbl_all_ecg_state, lv_color_hex(0xFFB300), 0);
+    lv_obj_align(lbl_all_ecg_state, LV_ALIGN_CENTER, 14, -14);
+
+    lbl_all_ecg_quality = lv_label_create(ecg_box);
+    lv_label_set_text(lbl_all_ecg_quality, "MQTT OFF");
+    lv_obj_set_style_text_font(lbl_all_ecg_quality, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(lbl_all_ecg_quality, lv_color_hex(0xAAAAAA), 0);
+    lv_obj_align(lbl_all_ecg_quality, LV_ALIGN_CENTER, 0, 14);
+
+    lbl_all_ecg_amp = lv_label_create(ecg_box);
+    lv_label_set_text(lbl_all_ecg_amp, "FRAME READY");
+    lv_obj_set_style_text_font(lbl_all_ecg_amp, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(lbl_all_ecg_amp, lv_color_hex(0x888888), 0);
+    lv_obj_align(lbl_all_ecg_amp, LV_ALIGN_BOTTOM_MID, 0, -6);
 
     // ── FOOTER: dist (trái) + status (phải) ────────────────────
     const lv_coord_t FOOTER_Y = ECG_Y + ECG_H + GAP;
@@ -2551,6 +2568,80 @@ void ui_update_ecg_live(float ecg_mv, int hr_bpm, bool leads_connected)
     }
 }
 
+void ui_update_ecg_lcd_point(int waveformY200, int hr_bpm, bool leads_connected)
+{
+    if (current_screen_type != SCR_ECG || !chart_ecg || !ser_ecg)
+    {
+        return;
+    }
+
+    static int lastValidHr = 0;
+    static unsigned long lastValidHrMs = 0;
+
+    if (!leads_connected)
+    {
+        if (ecg_lbl_warning)
+        {
+            lv_label_set_text(ecg_lbl_warning, "LEADS NOT CONNECTED");
+            lv_obj_clear_flag(ecg_lbl_warning, LV_OBJ_FLAG_HIDDEN);
+        }
+
+        lv_chart_set_next_value(chart_ecg, ser_ecg, 100);
+
+        if (lbl_hr_val)
+        {
+            lv_label_set_text(lbl_hr_val, "--");
+        }
+
+        if (ecg_beat_dot)
+        {
+            lv_obj_set_style_bg_color(ecg_beat_dot, lv_color_hex(0x330000), 0);
+        }
+        return;
+    }
+
+    if (ecg_lbl_warning)
+    {
+        lv_obj_add_flag(ecg_lbl_warning, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    lv_chart_set_next_value(chart_ecg, ser_ecg, constrain(waveformY200, 0, 200));
+
+    if (lbl_hr_val)
+    {
+        if (hr_bpm > 30 && hr_bpm < 220)
+        {
+            lastValidHr = hr_bpm;
+            lastValidHrMs = millis();
+            lv_label_set_text_fmt(lbl_hr_val, "%d", hr_bpm);
+        }
+        else if (lastValidHr > 0 && (millis() - lastValidHrMs) < 3500)
+        {
+            lv_label_set_text_fmt(lbl_hr_val, "%d", lastValidHr);
+        }
+        else
+        {
+            lv_label_set_text(lbl_hr_val, "--");
+        }
+    }
+
+    if (ecg_beat_dot)
+    {
+        if (hr_bpm > 30 && hr_bpm < 220)
+        {
+            unsigned long beatMs = 60000 / hr_bpm;
+            unsigned long phase = millis() % beatMs;
+            bool heartBright = (phase < 150);
+            lv_obj_set_style_bg_color(ecg_beat_dot,
+                                      heartBright ? lv_color_hex(0xFF1744) : lv_color_hex(0x330000), 0);
+        }
+        else
+        {
+            lv_obj_set_style_bg_color(ecg_beat_dot, lv_color_hex(0x330000), 0);
+        }
+    }
+}
+
 void ui_set_ambient_temp(float temp)
 {
     static lv_obj_t *lastAmbientObj = NULL;
@@ -2964,6 +3055,196 @@ void ui_set_measure_all_status(const char *msg, uint32_t colorHex)
     lv_obj_set_style_text_color(lbl_all_status, lv_color_hex(colorHex), 0);
 }
 
+void ui_update_measure_all_ecg_status(bool leadsOn,
+                                      bool mqttSending,
+                                      float ecgMv,
+                                      int hrBpm,
+                                      bool frameSentRecently,
+                                      uint8_t framePoints,
+                                      float frameP2pMv,
+                                      uint8_t frameClipPct)
+{
+    if (current_screen_type != SCR_MEASUREALL)
+    {
+        return;
+    }
+
+    if (lbl_all_ecg_state)
+    {
+        lv_label_set_text(lbl_all_ecg_state, leadsOn ? "ECG DATA" : "ECG LEADS OFF");
+        lv_obj_set_style_text_color(lbl_all_ecg_state, lv_color_hex(leadsOn ? 0x00E676 : 0xFF5252), 0);
+    }
+
+    if (lbl_all_ecg_quality)
+    {
+        if (mqttSending)
+        {
+            if (frameSentRecently)
+            {
+                lv_label_set_text_fmt(lbl_all_ecg_quality, "SENT %upt C%u%%", framePoints, frameClipPct);
+            }
+            else
+            {
+                lv_label_set_text_fmt(lbl_all_ecg_quality, "MQTT ON C%u%%", frameClipPct);
+            }
+        }
+        else
+        {
+            lv_label_set_text_fmt(lbl_all_ecg_quality, "MQTT OFF C%u%%", frameClipPct);
+        }
+        lv_obj_set_style_text_color(lbl_all_ecg_quality,
+                                    lv_color_hex(frameSentRecently ? 0x00E676 : (mqttSending ? 0x00E5FF : 0xAAAAAA)),
+                                    0);
+    }
+
+    if (lbl_all_ecg_amp)
+    {
+        if (leadsOn)
+        {
+            if (hrBpm > 0)
+            {
+                lv_label_set_text_fmt(lbl_all_ecg_amp, "P2P %.0fmV | HR %d", frameP2pMv, hrBpm);
+            }
+            else
+            {
+                lv_label_set_text_fmt(lbl_all_ecg_amp, "P2P %.0fmV | HR --", frameP2pMv);
+            }
+        }
+        else
+        {
+            lv_label_set_text(lbl_all_ecg_amp, "WAITING SIGNAL");
+        }
+    }
+
+    if (all_ecg_beat_dot)
+    {
+        lv_obj_set_style_bg_color(all_ecg_beat_dot,
+                                  leadsOn ? lv_color_hex(0x00E676) : lv_color_hex(0x331111),
+                                  0);
+    }
+}
+
+void ui_update_measure_all_ecg_waveform(int waveformY200, bool leadsOn)
+{
+    if (current_screen_type != SCR_MEASUREALL || !chart_ecg_mini || !ser_ecg_mini)
+    {
+        return;
+    }
+
+    static uint8_t clipCount = 0;
+    static uint8_t frameCount = 0;
+    static uint8_t weakCount = 0;
+    static uint8_t lastY = 100;
+    static uint16_t motionSum = 0;
+    static unsigned long beatFlashUntil = 0;
+    static unsigned long lastStatusUpdate = 0;
+
+    if (!leadsOn)
+    {
+        clipCount = 0;
+        frameCount = 0;
+        weakCount = 0;
+        motionSum = 0;
+        lastY = 100;
+
+        lv_chart_set_next_value(chart_ecg_mini, ser_ecg_mini, 100);
+        if (lbl_all_ecg_state)
+        {
+            lv_label_set_text(lbl_all_ecg_state, "ECG LEADS OFF");
+            lv_obj_set_style_text_color(lbl_all_ecg_state, lv_color_hex(0xFF5252), 0);
+        }
+        if (lbl_all_ecg_quality)
+        {
+            lv_label_set_text(lbl_all_ecg_quality, "Q: --");
+            lv_obj_set_style_text_color(lbl_all_ecg_quality, lv_color_hex(0x888888), 0);
+        }
+        if (lbl_all_ecg_amp)
+        {
+            lv_label_set_text(lbl_all_ecg_amp, "AMP --");
+        }
+        if (all_ecg_beat_dot)
+        {
+            lv_obj_set_style_bg_color(all_ecg_beat_dot, lv_color_hex(0x331111), 0);
+        }
+        return;
+    }
+
+    const uint8_t y = static_cast<uint8_t>(constrain(waveformY200, 0, 200));
+    lv_chart_set_next_value(chart_ecg_mini, ser_ecg_mini, y);
+
+    const uint8_t centered = (y > 100) ? (y - 100) : (100 - y);
+    const uint8_t delta = (y > lastY) ? (y - lastY) : (lastY - y);
+    lastY = y;
+    motionSum += delta;
+    frameCount++;
+    if (y <= 5 || y >= 195)
+    {
+        clipCount++;
+    }
+    if (centered < 4)
+    {
+        weakCount++;
+    }
+    if (centered > 42 || delta > 34)
+    {
+        beatFlashUntil = millis() + 90;
+    }
+
+    if (all_ecg_beat_dot)
+    {
+        lv_obj_set_style_bg_color(all_ecg_beat_dot,
+                                  (millis() < beatFlashUntil) ? lv_color_hex(0x00E676) : lv_color_hex(0x113322), 0);
+    }
+
+    if (millis() - lastStatusUpdate < 250)
+    {
+        return;
+    }
+    lastStatusUpdate = millis();
+
+    const uint8_t clipPct = frameCount > 0 ? (clipCount * 100 / frameCount) : 0;
+    const uint8_t weakPct = frameCount > 0 ? (weakCount * 100 / frameCount) : 0;
+    const uint8_t avgMotion = frameCount > 0 ? (motionSum / frameCount) : 0;
+    const char *quality = "OK";
+    uint32_t qualityColor = 0x00E676;
+
+    if (clipPct > 30)
+    {
+        quality = "CLIP";
+        qualityColor = 0xFF5252;
+    }
+    else if (weakPct > 75 || avgMotion < 2)
+    {
+        quality = "WEAK";
+        qualityColor = 0xFFB300;
+    }
+    else if (clipPct > 12 || avgMotion > 45)
+    {
+        quality = "NOISY";
+        qualityColor = 0xFFB300;
+    }
+
+    if (lbl_all_ecg_state)
+    {
+        lv_label_set_text(lbl_all_ecg_state, "ECG LIVE");
+        lv_obj_set_style_text_color(lbl_all_ecg_state, lv_color_hex(0x00E676), 0);
+    }
+    if (lbl_all_ecg_quality)
+    {
+        lv_label_set_text_fmt(lbl_all_ecg_quality, "Q: %s", quality);
+        lv_obj_set_style_text_color(lbl_all_ecg_quality, lv_color_hex(qualityColor), 0);
+    }
+    if (lbl_all_ecg_amp)
+    {
+        lv_label_set_text_fmt(lbl_all_ecg_amp, "AMP %u/100", static_cast<unsigned>(centered));
+    }
+
+    clipCount = 0;
+    frameCount = 0;
+    weakCount = 0;
+    motionSum = 0;
+}
+
 void ui_update_measureall_ecg(float ecg_mv, bool leads_connected)
 {
     if (current_screen_type != SCR_MEASUREALL || !chart_ecg_mini || !ser_ecg_mini)
@@ -2974,13 +3255,37 @@ void ui_update_measureall_ecg(float ecg_mv, bool leads_connected)
     static unsigned long lastUpdate = 0;
     static float displayBaseline = 0.0f;
     static float displayFiltered = 0.0f;
-    static float envelope = 130.0f;
-    static float yScale = 230.0f;
+    static float envelope = 110.0f;
+    static float yScale = 190.0f;
     static bool needsReprime = true;
+    static uint8_t clipCount = 0;
+    static uint8_t frameCount = 0;
+    static unsigned long beatFlashUntil = 0;
+    static unsigned long lastStatusUpdate = 0;
 
     if (!leads_connected)
     {
         needsReprime = true;
+        clipCount = 0;
+        frameCount = 0;
+        if (lbl_all_ecg_state)
+        {
+            lv_label_set_text(lbl_all_ecg_state, "ECG LEADS OFF");
+            lv_obj_set_style_text_color(lbl_all_ecg_state, lv_color_hex(0xFF5252), 0);
+        }
+        if (lbl_all_ecg_quality)
+        {
+            lv_label_set_text(lbl_all_ecg_quality, "Q: --");
+            lv_obj_set_style_text_color(lbl_all_ecg_quality, lv_color_hex(0x888888), 0);
+        }
+        if (lbl_all_ecg_amp)
+        {
+            lv_label_set_text(lbl_all_ecg_amp, "AMP --");
+        }
+        if (all_ecg_beat_dot)
+        {
+            lv_obj_set_style_bg_color(all_ecg_beat_dot, lv_color_hex(0x331111), 0);
+        }
         lv_chart_set_next_value(chart_ecg_mini, ser_ecg_mini, 100);
         return;
     }
@@ -2989,8 +3294,11 @@ void ui_update_measureall_ecg(float ecg_mv, bool leads_connected)
     {
         displayBaseline = ecg_mv;
         displayFiltered = 0.0f;
-        envelope = 130.0f;
-        yScale = 230.0f;
+        envelope = 110.0f;
+        yScale = 190.0f;
+        clipCount = 0;
+        frameCount = 0;
+        beatFlashUntil = 0;
         lastUpdate = millis();
         needsReprime = false;
     }
@@ -3012,19 +3320,78 @@ void ui_update_measureall_ecg(float ecg_mv, bool leads_connected)
             envelope = 0.20f * absDisplay + 0.80f * envelope;
         else
             envelope = 0.005f * absDisplay + 0.995f * envelope;
-        envelope = constrain(envelope, 95.0f, 320.0f);
+        envelope = constrain(envelope, 70.0f, 300.0f);
 
-        float targetScale = envelope * 1.90f;
-        if (targetScale < 230.0f)
-            targetScale = 230.0f;
+        float targetScale = envelope * 1.70f;
+        if (targetScale < 170.0f)
+            targetScale = 170.0f;
         yScale = 0.97f * yScale + 0.03f * targetScale;
-        yScale = constrain(yScale, 210.0f, 430.0f);
+        yScale = constrain(yScale, 160.0f, 380.0f);
 
         float limited = constrain(displayFiltered, -0.95f * yScale, 0.95f * yScale);
         int ecgChart = (int)((limited / yScale + 1.0f) * 100.0f);
         ecgChart = constrain(ecgChart, 0, 200);
 
         lv_chart_set_next_value(chart_ecg_mini, ser_ecg_mini, ecgChart);
+
+        frameCount++;
+        if (ecgChart <= 8 || ecgChart >= 192)
+        {
+            clipCount++;
+        }
+
+        if (fabsf(displayFiltered) > 0.70f * envelope)
+        {
+            beatFlashUntil = millis() + 90;
+        }
+
+        if (all_ecg_beat_dot)
+        {
+            lv_obj_set_style_bg_color(all_ecg_beat_dot,
+                                      (millis() < beatFlashUntil) ? lv_color_hex(0x00E676) : lv_color_hex(0x113322), 0);
+        }
+
+        if (millis() - lastStatusUpdate >= 250)
+        {
+            lastStatusUpdate = millis();
+            const uint8_t clipPct = (frameCount > 0) ? (clipCount * 100 / frameCount) : 0;
+            const char *quality = "OK";
+            uint32_t qualityColor = 0x00E676;
+
+            if (clipPct > 35 || envelope > 260.0f)
+            {
+                quality = "CLIP";
+                qualityColor = 0xFF5252;
+            }
+            else if (envelope < 75.0f)
+            {
+                quality = "WEAK";
+                qualityColor = 0xFFB300;
+            }
+            else if (clipPct > 15)
+            {
+                quality = "NOISY";
+                qualityColor = 0xFFB300;
+            }
+
+            if (lbl_all_ecg_state)
+            {
+                lv_label_set_text(lbl_all_ecg_state, "ECG LIVE");
+                lv_obj_set_style_text_color(lbl_all_ecg_state, lv_color_hex(0x00E676), 0);
+            }
+            if (lbl_all_ecg_quality)
+            {
+                lv_label_set_text_fmt(lbl_all_ecg_quality, "Q: %s", quality);
+                lv_obj_set_style_text_color(lbl_all_ecg_quality, lv_color_hex(qualityColor), 0);
+            }
+            if (lbl_all_ecg_amp)
+            {
+                lv_label_set_text_fmt(lbl_all_ecg_amp, "AMP %.0fmV", envelope);
+            }
+
+            clipCount = 0;
+            frameCount = 0;
+        }
     }
 }
 

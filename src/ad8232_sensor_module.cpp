@@ -104,20 +104,23 @@ int Ad8232SensorModule::mapFilteredSignalToChart(float filteredSignalMv)
         needsReprime_ = false;
     }
 
+    // Baseline tracking: clamp input để tránh HPF transient kéo baseline lệch
     float baselineInput = filteredSignalMv;
-    if (baselineInput < -90.0f)
-        baselineInput = -90.0f;
-    if (baselineInput > 90.0f)
-        baselineInput = 90.0f;
-
+    if (baselineInput < -150.0f)
+        baselineInput = -150.0f;
+    if (baselineInput > 150.0f)
+        baselineInput = 150.0f;
     displayBaseline_ = 0.992f * displayBaseline_ + 0.008f * baselineInput;
+
+    // OPT-4: Bỏ EMA displayFiltered_ (double-smoothing).
+    // filteredSignal đã qua HPF+notch+LPF trong ad8232.cpp — smooth thêm ở đây
+    // chỉ làm tù đỉnh QRS và giảm biên độ hiển thị trên LCD.
+    // Dùng thẳng centered để giữ nguyên biên độ QRS thật.
     const float centered = filteredSignalMv - displayBaseline_;
+    displayFiltered_ = centered; // giữ biến để không cần đổi header
 
-    const float delta = fabsf(centered - displayFiltered_);
-    const float smoothAlpha = (delta > 40.0f) ? 0.28f : 0.58f;
-    displayFiltered_ = smoothAlpha * displayFiltered_ + (1.0f - smoothAlpha) * centered;
-
-    const float absDisplay = fabsf(displayFiltered_);
+    // Envelope tracking trên centered (không qua EMA nữa → bắt đỉnh nhanh hơn)
+    const float absDisplay = fabsf(centered);
     if (absDisplay > envelope_)
     {
         envelope_ = 0.20f * absDisplay + 0.80f * envelope_;
@@ -134,9 +137,7 @@ int Ad8232SensorModule::mapFilteredSignalToChart(float filteredSignalMv)
 
     float targetScale = envelope_ * 1.90f;
     if (targetScale < 230.0f)
-    {
         targetScale = 230.0f;
-    }
     yScale_ = 0.97f * yScale_ + 0.03f * targetScale;
 
     if (yScale_ < 210.0f)
@@ -144,7 +145,7 @@ int Ad8232SensorModule::mapFilteredSignalToChart(float filteredSignalMv)
     if (yScale_ > 430.0f)
         yScale_ = 430.0f;
 
-    float limited = displayFiltered_;
+    float limited = centered;
     const float maxAbs = 0.95f * yScale_;
     if (limited > maxAbs)
         limited = maxAbs;

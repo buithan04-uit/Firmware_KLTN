@@ -17,6 +17,7 @@
 #include "mqtt_defaults.h"
 #include <HTTPClient.h>
 #include "boot_screen.h"
+#include "ecg_ai_bridge.h"
 
 const String GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwY5kIR9FeXT1DND8rfqvesckEdptbt2v3hgehC8wbzYHp1_POFO8n5Qf0BMy1asSc/exec";
 
@@ -24,19 +25,27 @@ TFT_eSPI tft = TFT_eSPI();
 bool in_menu = false;
 static constexpr uint32_t SENSOR_UI_UPDATE_MS = 80;
 static constexpr uint32_t ECG_SAMPLE_UPDATE_MS = 4;
-static constexpr uint32_t ECG_UI_UPDATE_MS = 8;
-static constexpr uint32_t ECG_LOG_INTERVAL_MS = 120;
+// LCD displays a decimated view; MQTT still keeps the full 250Hz ECG stream.
+static constexpr uint32_t ECG_UI_UPDATE_MS = 12;
+static constexpr uint32_t ECG_LOG_INTERVAL_MS = 1000;
+static constexpr uint32_t ECG_DEBUG_JSON_INTERVAL_MS = 1000;
 static constexpr uint32_t ECG_IDLE_SAMPLE_MS = 30;
 static constexpr uint32_t CONFIG_UI_UPDATE_MS = 1000;
 static constexpr uint32_t WIFI_HEADER_UPDATE_MS = 800;
 static constexpr uint8_t STATE_CONFIRM_TICKS = 3;
 static constexpr uint32_t LIVE_LOG_INTERVAL_MS = 1500;
-static constexpr uint32_t MQTT_RECONNECT_INTERVAL_MS = 3000;
+static constexpr uint32_t MQTT_RECONNECT_INTERVAL_MS = 10000;
 static constexpr uint32_t MQTT_PUBLISH_INTERVAL_MS = 700;
+static constexpr uint32_t MQTT_ECG_FRAME_INTERVAL_MS = 250;
 static constexpr uint32_t MQTT_OK_LOG_INTERVAL_MS = 1500;
+static constexpr uint8_t MQTT_MAX_CONNECT_FAILS = 3;
 static constexpr uint8_t TP5100_CHRG_PIN = 34; // TLP521-2 output CHRG, active LOW
 static constexpr uint8_t TP5100_FULL_PIN = 35; // TLP521-2 output STDBY/FULL, active LOW
-static constexpr size_t MQTT_PAYLOAD_BUFFER = 384;
+static constexpr size_t MQTT_PAYLOAD_BUFFER = 3072;
+static constexpr uint16_t ECG_FRAME_RAW_CAP = 160;
+static constexpr uint8_t ECG_FRAME_POINTS = 64;
+static constexpr uint16_t ECG_FRAME_FS_HZ = 250;
+static constexpr uint16_t ECG_LCD_QUEUE_CAP = 96;
 static constexpr uint8_t COLLECT_SAMPLE_LIMIT = 6;
 static constexpr uint8_t COLLECT_PERSON_MAX = 7;
 static constexpr uint8_t COLLECT_SESSION_MAX = 5;
@@ -51,7 +60,7 @@ static constexpr float COLLECT_AMBIENT_MAX_C = 35.0f;
 static constexpr float COLLECT_BODY_MIN_C = 32.0f;
 static constexpr float COLLECT_BODY_MAX_C = 42.0f;
 
-static constexpr float VL53_TO_MLX_OFFSET_MM = 18.0f;
+static constexpr float VL53_TO_MLX_OFFSET_MM = 0.0f;
 static LcdSensorRuntime sensorRuntime;
 static WifiConfigManager wifiConfigManager;
 static TaskHandle_t ecgSamplingTaskHandle = nullptr;
@@ -63,10 +72,21 @@ static SensorSnapshot latestMaxSnapshot;
 static bool latestMaxLive = false;
 static float latestEcgSample = 0.0f;
 static bool latestEcgLive = false;
+static int latestEcgHrBpm = 0;
+static int latestPpgHrBpm = 0;
+static int latestFusedHrBpm = 0;
 static bool mqttSendEnabled = false;
+static uint8_t mqttConnectFailStreak = 0;
 static unsigned long lastMqttReconnectAt = 0;
 static unsigned long lastMqttPublishAt = 0;
+static unsigned long lastMqttEcgFrameAt = 0;
 static unsigned long lastMqttOkLogAt = 0;
+static bool lastEcgFramePublishOk = false;
+static unsigned long lastEcgFramePublishAt = 0;
+static uint8_t lastEcgFramePublishN = 0;
+static int16_t lastEcgFrameMinMv100 = 0;
+static int16_t lastEcgFrameMaxMv100 = 0;
+static uint8_t lastEcgFrameClipPct = 0;
 static char mqttBrokerHost[64] = {0};
 static uint16_t mqttBrokerPort = kDefaultMqttPort;
 SemaphoreHandle_t i2c0Mutex = NULL;
@@ -94,11 +114,403 @@ static float measureAllPendingEcg = 0.0f;
 static int measureAllPendingHr = 0;
 static int measureAllPendingSpo2 = 0;
 
+struct EcgFrameSample
+{
+    uint32_t ms;
+    int16_t mv100;
+    uint8_t y;
+};
+
+static portMUX_TYPE ecgFrameMux = portMUX_INITIALIZER_UNLOCKED;
+static EcgFrameSample ecgFrameRaw[ECG_FRAME_RAW_CAP];
+static uint16_t ecgFrameHead = 0;
+static uint16_t ecgFrameCount = 0;
+static uint32_t ecgFrameSeq = 0;
+
 static void updateTp5100ChargeStatus()
 {
     const bool chargingActive = (digitalRead(TP5100_CHRG_PIN) == LOW);
     const bool fullActive = (digitalRead(TP5100_FULL_PIN) == LOW);
     sensorRuntime.setBatteryChargeStatus(chargingActive, fullActive);
+}
+
+static size_t formatEcgSampleJson(char *buffer,
+                                  size_t bufferSize,
+                                  const char *mode,
+                                  uint32_t seq,
+                                  float rawMv,
+                                  float filteredMv,
+                                  int hrBpm,
+                                  bool leadsConnected,
+                                  int chartValue)
+{
+    return snprintf(buffer,
+                    bufferSize,
+                    "{\"device_id\":\"%s\",\"type\":\"ecg_sample\",\"mode\":\"%s\",\"seq\":%lu,\"ts\":%lu,\"ecg\":%.2f,\"raw_mv\":%.2f,\"filtered_mv\":%.2f,\"chart\":%d,\"hr\":%d,\"leads\":%s}",
+                    mqttDeviceId.c_str(),
+                    mode,
+                    static_cast<unsigned long>(seq),
+                    static_cast<unsigned long>(millis()),
+                    filteredMv,
+                    rawMv,
+                    filteredMv,
+                    chartValue,
+                    hrBpm,
+                    leadsConnected ? "true" : "false");
+}
+
+static void logEcgSampleJson(const char *mode, float rawMv, float filteredMv, int hrBpm, bool leadsConnected, int chartValue)
+{
+    static uint32_t seq = 0;
+    char payload[224];
+    formatEcgSampleJson(payload, sizeof(payload), mode, seq++, rawMv, filteredMv, hrBpm, leadsConnected, chartValue);
+    Serial.println(payload);
+}
+
+static int16_t ecgMvToCentimv(float mv)
+{
+    const float clamped = constrain(mv, -3000.0f, 3000.0f);
+    return static_cast<int16_t>(clamped * 100.0f);
+}
+
+static uint8_t latestEcgLcdY = 100;
+static portMUX_TYPE ecgLcdQueueMux = portMUX_INITIALIZER_UNLOCKED;
+static uint8_t ecgLcdQueue[ECG_LCD_QUEUE_CAP];
+static uint16_t ecgLcdQueueHead = 0;
+static uint16_t ecgLcdQueueCount = 0;
+
+static uint8_t mapEcgMvToLcdY(float ecgMv, bool leadsConnected)
+{
+    static float slowBaseline = 0.0f;
+    static float envelope = 160.0f;
+    static float displayY = 100.0f;
+    static bool needsReprime = true;
+
+    if (!leadsConnected)
+    {
+        slowBaseline = 0.0f;
+        envelope = 160.0f;
+        displayY = 100.0f;
+        needsReprime = true;
+        return 100;
+    }
+
+    if (needsReprime)
+    {
+        slowBaseline = ecgMv;
+        envelope = fmaxf(fabsf(ecgMv), 160.0f);
+        displayY = 100.0f;
+        needsReprime = false;
+    }
+
+    slowBaseline = 0.9998f * slowBaseline + 0.0002f * ecgMv;
+    const float centered = ecgMv - slowBaseline;
+    const float absVal = fabsf(centered);
+    if (absVal > envelope)
+    {
+        envelope = 0.22f * absVal + 0.78f * envelope;
+    }
+    else
+    {
+        envelope = 0.003f * absVal + 0.997f * envelope;
+    }
+
+    envelope = constrain(envelope, 160.0f, 900.0f);
+    const float clamped = constrain(centered, -0.88f * envelope, 0.88f * envelope);
+    const float normalized = clamped / envelope;
+    const float targetY = constrain(100.0f + normalized * 78.0f, 12.0f, 188.0f);
+    displayY = 0.35f * targetY + 0.65f * displayY;
+    return static_cast<uint8_t>(constrain(static_cast<int>(displayY + 0.5f), 0, 200));
+}
+
+static void ecgLcdQueueReset()
+{
+    portENTER_CRITICAL(&ecgLcdQueueMux);
+    ecgLcdQueueHead = 0;
+    ecgLcdQueueCount = 0;
+    portEXIT_CRITICAL(&ecgLcdQueueMux);
+    latestEcgLcdY = 100;
+}
+
+static void ecgLcdQueuePush(uint8_t y)
+{
+    portENTER_CRITICAL(&ecgLcdQueueMux);
+    ecgLcdQueue[ecgLcdQueueHead] = y;
+    ecgLcdQueueHead = (ecgLcdQueueHead + 1) % ECG_LCD_QUEUE_CAP;
+    if (ecgLcdQueueCount < ECG_LCD_QUEUE_CAP)
+    {
+        ecgLcdQueueCount++;
+    }
+    portEXIT_CRITICAL(&ecgLcdQueueMux);
+}
+
+static bool ecgLcdQueuePopLatest(uint8_t &y)
+{
+    portENTER_CRITICAL(&ecgLcdQueueMux);
+    if (ecgLcdQueueCount == 0)
+    {
+        portEXIT_CRITICAL(&ecgLcdQueueMux);
+        return false;
+    }
+
+    const uint16_t latestIdx = (ecgLcdQueueHead + ECG_LCD_QUEUE_CAP - 1) % ECG_LCD_QUEUE_CAP;
+    y = ecgLcdQueue[latestIdx];
+    ecgLcdQueueCount = 0;
+    portEXIT_CRITICAL(&ecgLcdQueueMux);
+    return true;
+}
+
+static void ecgFramePush(float filteredMv, int chartY)
+{
+    EcgFrameSample sample;
+    sample.ms = millis();
+    sample.mv100 = ecgMvToCentimv(filteredMv);
+    sample.y = static_cast<uint8_t>(constrain(chartY, 0, 200));
+
+    portENTER_CRITICAL(&ecgFrameMux);
+    ecgFrameRaw[ecgFrameHead] = sample;
+    ecgFrameHead = (ecgFrameHead + 1) % ECG_FRAME_RAW_CAP;
+    if (ecgFrameCount < ECG_FRAME_RAW_CAP)
+    {
+        ecgFrameCount++;
+    }
+    portEXIT_CRITICAL(&ecgFrameMux);
+}
+
+static bool ecgFrameBuild(uint32_t &seq, uint32_t &startMs, uint8_t &outCount, int16_t *mv100Out, uint8_t *yOut)
+{
+    EcgFrameSample raw[ECG_FRAME_RAW_CAP];
+    uint16_t count = 0;
+    uint16_t head = 0;
+
+    portENTER_CRITICAL(&ecgFrameMux);
+    count = ecgFrameCount;
+    head = ecgFrameHead;
+    for (uint16_t i = 0; i < count; i++)
+    {
+        const uint16_t idx = (head + ECG_FRAME_RAW_CAP - count + i) % ECG_FRAME_RAW_CAP;
+        raw[i] = ecgFrameRaw[idx];
+    }
+    portEXIT_CRITICAL(&ecgFrameMux);
+
+    if (count < 4)
+    {
+        return false;
+    }
+
+    seq = ecgFrameSeq++;
+    startMs = raw[0].ms;
+
+    if (count <= ECG_FRAME_POINTS)
+    {
+        outCount = static_cast<uint8_t>(count);
+        for (uint8_t i = 0; i < outCount; i++)
+        {
+            mv100Out[i] = raw[i].mv100;
+            yOut[i] = raw[i].y;
+        }
+        return true;
+    }
+
+    outCount = 0;
+    const uint8_t buckets = ECG_FRAME_POINTS / 2;
+    for (uint8_t b = 0; b < buckets && outCount < ECG_FRAME_POINTS; b++)
+    {
+        const uint16_t begin = (static_cast<uint32_t>(b) * count) / buckets;
+        uint16_t end = (static_cast<uint32_t>(b + 1) * count) / buckets;
+        if (end <= begin)
+        {
+            end = begin + 1;
+        }
+        if (end > count)
+        {
+            end = count;
+        }
+
+        uint16_t minIdx = begin;
+        uint16_t maxIdx = begin;
+        for (uint16_t i = begin + 1; i < end; i++)
+        {
+            if (raw[i].mv100 < raw[minIdx].mv100)
+            {
+                minIdx = i;
+            }
+            if (raw[i].mv100 > raw[maxIdx].mv100)
+            {
+                maxIdx = i;
+            }
+        }
+
+        const uint16_t first = (minIdx < maxIdx) ? minIdx : maxIdx;
+        const uint16_t second = (minIdx < maxIdx) ? maxIdx : minIdx;
+        mv100Out[outCount] = raw[first].mv100;
+        yOut[outCount++] = raw[first].y;
+        if (outCount < ECG_FRAME_POINTS && second != first)
+        {
+            mv100Out[outCount] = raw[second].mv100;
+            yOut[outCount++] = raw[second].y;
+        }
+    }
+
+    return outCount > 0;
+}
+
+static bool isValidHeartRate(int hr)
+{
+    return hr >= 35 && hr <= 220;
+}
+
+static int fuseHeartRate(int ecgHr, bool ecgLive, int ppgHr, bool ppgLive)
+{
+    const bool ecgValid = ecgLive && isValidHeartRate(ecgHr);
+    const bool ppgValid = ppgLive && isValidHeartRate(ppgHr);
+
+    if (ecgValid && ppgValid)
+    {
+        const int diff = abs(ecgHr - ppgHr);
+        if (diff <= 12)
+        {
+            return (ecgHr * 6 + ppgHr * 4 + 5) / 10;
+        }
+        // ECG detects electrical beats directly; when the two sensors disagree,
+        // prefer ECG but keep PPG as a fallback when ECG is not stable.
+        return ecgHr;
+    }
+    if (ecgValid)
+    {
+        return ecgHr;
+    }
+    if (ppgValid)
+    {
+        return ppgHr;
+    }
+    return 0;
+}
+
+static const char *heartRateSource(int ecgHr, bool ecgLive, int ppgHr, bool ppgLive)
+{
+    const bool ecgValid = ecgLive && isValidHeartRate(ecgHr);
+    const bool ppgValid = ppgLive && isValidHeartRate(ppgHr);
+    if (ecgValid && ppgValid)
+    {
+        return abs(ecgHr - ppgHr) <= 12 ? "fusion" : "ecg";
+    }
+    if (ecgValid)
+    {
+        return "ecg";
+    }
+    if (ppgValid)
+    {
+        return "ppg";
+    }
+    return "none";
+}
+
+static int effectiveEcgHeartRate(bool ecgLive, int snapshotHr)
+{
+    if (!ecgLive)
+    {
+        return 0;
+    }
+
+    const int directHr = getHeartRate();
+    if (isValidHeartRate(directHr))
+    {
+        return directHr;
+    }
+    if (isValidHeartRate(snapshotHr))
+    {
+        return snapshotHr;
+    }
+    return 0;
+}
+
+static void publishAiWindow(const float *window, int len)
+{
+    if (!mqttClient.connected())
+        return;
+
+    // JSON: {"beat": <count>, "fs": 360, "window": [f0, f1, ..., f99]}
+    // Kích thước ước tính: 100 float × 10 ký tự = ~1000 byte
+    // MQTT_PAYLOAD_BUFFER hiện tại = 384 — cần tăng lên ít nhất 1200
+    //
+    // *** SỬA MQTT_PAYLOAD_BUFFER = 1300 trong lcd.cpp ***
+    // static constexpr size_t MQTT_PAYLOAD_BUFFER = 1300;
+
+    static char aiBuf[1300];
+    int pos = 0;
+
+    pos += snprintf(aiBuf + pos, sizeof(aiBuf) - pos,
+                    "{\"type\":\"ecg_beat\",\"beat\":%lu,\"fs\":360,\"n\":%d,\"window\":[",
+                    (unsigned long)ecgAiBridge.beatCount(), len);
+
+    for (int i = 0; i < len && pos < (int)sizeof(aiBuf) - 16; i++)
+    {
+        pos += snprintf(aiBuf + pos, sizeof(aiBuf) - pos,
+                        i < len - 1 ? "%.4f," : "%.4f", window[i]);
+    }
+
+    pos += snprintf(aiBuf + pos, sizeof(aiBuf) - pos, "]}");
+
+    const String topic = mqttPublishTopic + "/ai";
+    bool ok = mqttClient.publish(topic.c_str(), aiBuf);
+
+    static unsigned long lastAiLog = 0;
+    if (millis() - lastAiLog >= 2000)
+    {
+        lastAiLog = millis();
+        Serial.printf("[AI] Beat #%lu published %s (len=%d)\n",
+                      (unsigned long)ecgAiBridge.beatCount(),
+                      ok ? "OK" : "FAIL", pos);
+    }
+}
+
+static bool publishAiTrainingWindow(const float *window, int len)
+{
+    if (!mqttSendEnabled || !mqttClient.connected())
+        return false;
+
+    static char payload[MQTT_PAYLOAD_BUFFER];
+    int pos = 0;
+    pos += snprintf(payload + pos, sizeof(payload) - pos,
+                    "{\"device_id\":\"%s\",\"type\":\"ecg_ai_window\",\"mode\":\"ecg_ai\","
+                    "\"fs\":%.0f,\"n\":%d,\"r_peak_index\":%d,"
+                    "\"normalized\":true,\"mean\":%.8f,\"std\":%.8f,\"ecg\":%.2f,\"window\":[",
+                    mqttDeviceId.c_str(),
+                    AI_INPUT_FS,
+                    len,
+                    AI_HALF_WIN,
+                    MITBIH_MEAN,
+                    MITBIH_STD,
+                    latestEcgSample);
+
+    for (int i = 0; i < len && pos < (int)sizeof(payload) - 16; i++)
+    {
+        pos += snprintf(payload + pos,
+                        sizeof(payload) - pos,
+                        i < len - 1 ? "%.4f," : "%.4f",
+                        window[i]);
+    }
+
+    pos += snprintf(payload + pos, sizeof(payload) - pos, "]}");
+    if (pos <= 0 || pos >= (int)sizeof(payload))
+    {
+        Serial.println("[AI] Training window payload exceeded MQTT buffer.");
+        return false;
+    }
+
+    const bool ok = mqttClient.publish(mqttPublishTopic.c_str(), payload);
+    static unsigned long lastLog = 0;
+    if (millis() - lastLog >= 2000)
+    {
+        lastLog = millis();
+        Serial.printf("[AI] Training window beat=%lu publish %s topic=%s len=%d\n",
+                      static_cast<unsigned long>(ecgAiBridge.beatCount()),
+                      ok ? "OK" : "FAIL",
+                      mqttPublishTopic.c_str(),
+                      pos);
+    }
+    return ok;
 }
 
 __attribute__((constructor)) static void early_boot_log()
@@ -190,6 +602,7 @@ static bool ensureMqttConnected(const WifiConfigManager &wifi)
     const bool connected = mqttClient.connect(clientId.c_str(), mqttUser.c_str(), mqttPass.c_str());
     if (connected)
     {
+        mqttConnectFailStreak = 0;
         Serial.printf("[MQTT] Connect %s:%u as %s => OK\n",
                       mqttBrokerHost,
                       static_cast<unsigned>(mqttBrokerPort),
@@ -197,13 +610,321 @@ static bool ensureMqttConnected(const WifiConfigManager &wifi)
     }
     else
     {
+        if (mqttConnectFailStreak < MQTT_MAX_CONNECT_FAILS)
+        {
+            mqttConnectFailStreak++;
+        }
         Serial.printf("[MQTT] Connect %s:%u as %s => FAILED (state=%d)\n",
                       mqttBrokerHost,
                       static_cast<unsigned>(mqttBrokerPort),
                       mqttUser.c_str(),
                       mqttClient.state());
+        if (mqttConnectFailStreak >= MQTT_MAX_CONNECT_FAILS)
+        {
+            mqttSendEnabled = false;
+            mqttConnectFailStreak = 0;
+            ui_set_mqtt_status("MQTT FAIL", 0xFF5252);
+            Serial.println("[MQTT] Disabled SEND after repeated connection failures.");
+        }
     }
     return connected;
+}
+
+static void publishEcgStreamIfConnected(const char *mode, float rawMv, float filteredMv, int hrBpm, bool leadsConnected, int chartValue)
+{
+    if (!mqttSendEnabled || !mqttClient.connected())
+    {
+        return;
+    }
+
+    static uint32_t ecgMqttSeq = 0;
+    char payload[224];
+    const size_t payloadLen = formatEcgSampleJson(payload,
+                                                  sizeof(payload),
+                                                  mode,
+                                                  ecgMqttSeq++,
+                                                  rawMv,
+                                                  filteredMv,
+                                                  hrBpm,
+                                                  leadsConnected,
+                                                  chartValue);
+    if (payloadLen == 0 || payloadLen >= sizeof(payload))
+    {
+        return;
+    }
+
+    mqttClient.publish(mqttPublishTopic.c_str(), payload);
+}
+
+static void publishEcgFrameIfReady(const WifiConfigManager &wifi, ScreenType activeScreen)
+{
+    if (!mqttSendEnabled || !(activeScreen == SCR_ECG || activeScreen == SCR_MEASUREALL) || !latestEcgLive)
+    {
+        return;
+    }
+
+    const unsigned long now = millis();
+    if (now - lastMqttEcgFrameAt < MQTT_ECG_FRAME_INTERVAL_MS)
+    {
+        return;
+    }
+    lastMqttEcgFrameAt = now;
+
+    if (!ensureMqttConnected(wifi))
+    {
+        return;
+    }
+
+    uint32_t seq = 0;
+    uint32_t startMs = 0;
+    uint8_t n = 0;
+    int16_t mv100[ECG_FRAME_POINTS];
+    uint8_t y[ECG_FRAME_POINTS];
+    if (!ecgFrameBuild(seq, startMs, n, mv100, y))
+    {
+        return;
+    }
+
+    int16_t minMv100 = mv100[0];
+    int16_t maxMv100 = mv100[0];
+    uint8_t clipCount = 0;
+    for (uint8_t i = 0; i < n; i++)
+    {
+        if (mv100[i] < minMv100)
+        {
+            minMv100 = mv100[i];
+        }
+        if (mv100[i] > maxMv100)
+        {
+            maxMv100 = mv100[i];
+        }
+        if (y[i] <= 15 || y[i] >= 185)
+        {
+            clipCount++;
+        }
+    }
+    const uint8_t clipPct = n > 0 ? static_cast<uint8_t>((clipCount * 100U) / n) : 0;
+    const int frameHr = fuseHeartRate(latestEcgHrBpm, latestEcgLive, latestPpgHrBpm, latestMaxLive);
+    const char *frameHrSource = heartRateSource(latestEcgHrBpm, latestEcgLive, latestPpgHrBpm, latestMaxLive);
+
+    static char payload[MQTT_PAYLOAD_BUFFER];
+    int pos = snprintf(payload,
+                       sizeof(payload),
+                       "{\"device_id\":\"%s\",\"type\":\"ecg_frame\",\"mode\":\"%s\","
+                       "\"seq\":%lu,\"ts\":%lu,\"start_ms\":%lu,\"fs\":%u,"
+                       "\"n\":%u,\"unit\":\"mV\",\"display\":\"minmax\",\"ecg\":%.2f,"
+                       "\"hr\":%d,\"hr_ecg\":%d,\"hr_ppg\":%d,\"hr_source\":\"%s\","
+                       "\"min_mv\":%.2f,\"max_mv\":%.2f,\"p2p_mv\":%.2f,\"clip_pct\":%u,\"clip\":%u,"
+                       "\"lcd_y_origin\":\"bottom\",\"ecg_points\":[",
+                       mqttDeviceId.c_str(),
+                       activeScreen == SCR_MEASUREALL ? "measure_all" : "ecg",
+                       static_cast<unsigned long>(seq),
+                       static_cast<unsigned long>(now),
+                       static_cast<unsigned long>(startMs),
+                       static_cast<unsigned>(ECG_FRAME_FS_HZ),
+                       static_cast<unsigned>(n),
+                       latestEcgSample,
+                       frameHr,
+                       latestEcgHrBpm,
+                       latestPpgHrBpm,
+                       frameHrSource,
+                       minMv100 / 100.0f,
+                       maxMv100 / 100.0f,
+                       (maxMv100 - minMv100) / 100.0f,
+                       static_cast<unsigned>(clipPct),
+                       static_cast<unsigned>(clipPct));
+
+    for (uint8_t i = 0; i < n && pos < static_cast<int>(sizeof(payload)) - 24; i++)
+    {
+        pos += snprintf(payload + pos,
+                        sizeof(payload) - pos,
+                        i + 1 < n ? "%.2f," : "%.2f",
+                        mv100[i] / 100.0f);
+    }
+
+    pos += snprintf(payload + pos, sizeof(payload) - pos, "],\"mv\":[");
+    for (uint8_t i = 0; i < n && pos < static_cast<int>(sizeof(payload)) - 24; i++)
+    {
+        pos += snprintf(payload + pos,
+                        sizeof(payload) - pos,
+                        i + 1 < n ? "%.2f," : "%.2f",
+                        mv100[i] / 100.0f);
+    }
+
+    pos += snprintf(payload + pos, sizeof(payload) - pos, "],\"ecg_lcd_points\":[");
+    for (uint8_t i = 0; i < n && pos < static_cast<int>(sizeof(payload)) - 8; i++)
+    {
+        pos += snprintf(payload + pos,
+                        sizeof(payload) - pos,
+                        i + 1 < n ? "%u," : "%u",
+                        static_cast<unsigned>(y[i]));
+    }
+    pos += snprintf(payload + pos, sizeof(payload) - pos, "],\"y\":[");
+    for (uint8_t i = 0; i < n && pos < static_cast<int>(sizeof(payload)) - 8; i++)
+    {
+        pos += snprintf(payload + pos,
+                        sizeof(payload) - pos,
+                        i + 1 < n ? "%u," : "%u",
+                        static_cast<unsigned>(y[i]));
+    }
+    pos += snprintf(payload + pos, sizeof(payload) - pos, "]}");
+
+    if (pos <= 0 || pos >= static_cast<int>(sizeof(payload)))
+    {
+        Serial.println("[MQTT][ECG_FRAME] Payload exceeded MQTT buffer.");
+        return;
+    }
+
+    const bool ok = mqttClient.publish(mqttPublishTopic.c_str(), payload);
+    lastEcgFramePublishOk = ok;
+    lastEcgFramePublishAt = millis();
+    lastEcgFramePublishN = n;
+    lastEcgFrameMinMv100 = minMv100;
+    lastEcgFrameMaxMv100 = maxMv100;
+    lastEcgFrameClipPct = clipPct;
+    static unsigned long lastLog = 0;
+    if (millis() - lastLog >= MQTT_OK_LOG_INTERVAL_MS)
+    {
+        lastLog = millis();
+        Serial.printf("[MQTT][ECG_FRAME] Publish %s topic=%s n=%u p2p=%.2fmV clip=%u%% len=%d payload=%s\n",
+                      ok ? "OK" : "FAIL",
+                      mqttPublishTopic.c_str(),
+                      static_cast<unsigned>(n),
+                      (maxMv100 - minMv100) / 100.0f,
+                      static_cast<unsigned>(clipPct),
+                      pos,
+                      payload);
+    }
+}
+
+static void logEcgFrameDebugIfReady(ScreenType activeScreen)
+{
+    if (mqttSendEnabled || !(activeScreen == SCR_ECG || activeScreen == SCR_MEASUREALL) || !latestEcgLive)
+    {
+        return;
+    }
+
+    static unsigned long lastDebugFrameAt = 0;
+    const unsigned long now = millis();
+    if (now - lastDebugFrameAt < MQTT_OK_LOG_INTERVAL_MS)
+    {
+        return;
+    }
+    lastDebugFrameAt = now;
+
+    uint32_t seq = 0;
+    uint32_t startMs = 0;
+    uint8_t n = 0;
+    int16_t mv100[ECG_FRAME_POINTS];
+    uint8_t y[ECG_FRAME_POINTS];
+    if (!ecgFrameBuild(seq, startMs, n, mv100, y))
+    {
+        return;
+    }
+
+    int16_t minMv100 = mv100[0];
+    int16_t maxMv100 = mv100[0];
+    uint8_t clipCount = 0;
+    for (uint8_t i = 0; i < n; i++)
+    {
+        if (mv100[i] < minMv100)
+        {
+            minMv100 = mv100[i];
+        }
+        if (mv100[i] > maxMv100)
+        {
+            maxMv100 = mv100[i];
+        }
+        if (y[i] <= 15 || y[i] >= 185)
+        {
+            clipCount++;
+        }
+    }
+
+    const uint8_t clipPct = n > 0 ? static_cast<uint8_t>((clipCount * 100U) / n) : 0;
+    const int frameHr = fuseHeartRate(latestEcgHrBpm, latestEcgLive, latestPpgHrBpm, latestMaxLive);
+    const char *frameHrSource = heartRateSource(latestEcgHrBpm, latestEcgLive, latestPpgHrBpm, latestMaxLive);
+
+    static char payload[MQTT_PAYLOAD_BUFFER];
+    int pos = snprintf(payload,
+                       sizeof(payload),
+                       "{\"device_id\":\"%s\",\"type\":\"ecg_frame\",\"mode\":\"%s\","
+                       "\"seq\":%lu,\"ts\":%lu,\"start_ms\":%lu,\"fs\":%u,"
+                       "\"n\":%u,\"unit\":\"mV\",\"display\":\"minmax\",\"ecg\":%.2f,"
+                       "\"hr\":%d,\"hr_ecg\":%d,\"hr_ppg\":%d,\"hr_source\":\"%s\","
+                       "\"min_mv\":%.2f,\"max_mv\":%.2f,\"p2p_mv\":%.2f,\"clip_pct\":%u,\"clip\":%u,"
+                       "\"lcd_y_origin\":\"bottom\",\"ecg_points\":[",
+                       mqttDeviceId.c_str(),
+                       activeScreen == SCR_MEASUREALL ? "measure_all" : "ecg",
+                       static_cast<unsigned long>(seq),
+                       static_cast<unsigned long>(now),
+                       static_cast<unsigned long>(startMs),
+                       static_cast<unsigned>(ECG_FRAME_FS_HZ),
+                       static_cast<unsigned>(n),
+                       latestEcgSample,
+                       frameHr,
+                       latestEcgHrBpm,
+                       latestPpgHrBpm,
+                       frameHrSource,
+                       minMv100 / 100.0f,
+                       maxMv100 / 100.0f,
+                       (maxMv100 - minMv100) / 100.0f,
+                       static_cast<unsigned>(clipPct),
+                       static_cast<unsigned>(clipPct));
+
+    for (uint8_t i = 0; i < n && pos < static_cast<int>(sizeof(payload)) - 24; i++)
+    {
+        pos += snprintf(payload + pos,
+                        sizeof(payload) - pos,
+                        i + 1 < n ? "%.2f," : "%.2f",
+                        mv100[i] / 100.0f);
+    }
+
+    pos += snprintf(payload + pos, sizeof(payload) - pos, "],\"mv\":[");
+    for (uint8_t i = 0; i < n && pos < static_cast<int>(sizeof(payload)) - 24; i++)
+    {
+        pos += snprintf(payload + pos,
+                        sizeof(payload) - pos,
+                        i + 1 < n ? "%.2f," : "%.2f",
+                        mv100[i] / 100.0f);
+    }
+
+    pos += snprintf(payload + pos, sizeof(payload) - pos, "],\"ecg_lcd_points\":[");
+    for (uint8_t i = 0; i < n && pos < static_cast<int>(sizeof(payload)) - 8; i++)
+    {
+        pos += snprintf(payload + pos,
+                        sizeof(payload) - pos,
+                        i + 1 < n ? "%u," : "%u",
+                        static_cast<unsigned>(y[i]));
+    }
+    pos += snprintf(payload + pos, sizeof(payload) - pos, "],\"y\":[");
+    for (uint8_t i = 0; i < n && pos < static_cast<int>(sizeof(payload)) - 8; i++)
+    {
+        pos += snprintf(payload + pos,
+                        sizeof(payload) - pos,
+                        i + 1 < n ? "%u," : "%u",
+                        static_cast<unsigned>(y[i]));
+    }
+    pos += snprintf(payload + pos, sizeof(payload) - pos, "]}");
+
+    if (pos <= 0 || pos >= static_cast<int>(sizeof(payload)))
+    {
+        Serial.println("[ECG][FRAME_DEBUG] Payload exceeded debug buffer.");
+        return;
+    }
+
+    lastEcgFramePublishN = n;
+    lastEcgFrameMinMv100 = minMv100;
+    lastEcgFrameMaxMv100 = maxMv100;
+    lastEcgFrameClipPct = clipPct;
+
+    Serial.printf("[ECG][FRAME_DEBUG] mode=%s n=%u p2p=%.2fmV clip=%u%% len=%d payload=%s\n",
+                  activeScreen == SCR_MEASUREALL ? "measure_all" : "ecg",
+                  static_cast<unsigned>(n),
+                  (maxMv100 - minMv100) / 100.0f,
+                  static_cast<unsigned>(clipPct),
+                  pos,
+                  payload);
 }
 
 static void publishTelemetryIfReady(const WifiConfigManager &wifi, const LcdSensorRuntime &runtime, ScreenType activeScreen)
@@ -213,7 +934,7 @@ static void publishTelemetryIfReady(const WifiConfigManager &wifi, const LcdSens
         return;
     }
 
-    StaticJsonDocument<320> doc;
+    StaticJsonDocument<448> doc;
     const char *modeName = nullptr;
     bool hasField = false;
 
@@ -264,9 +985,23 @@ static void publishTelemetryIfReady(const WifiConfigManager &wifi, const LcdSens
 
     case SCR_MEASUREALL:
         modeName = "measureall";
+        if (isValidHeartRate(latestFusedHrBpm))
+        {
+            doc["hr"] = latestFusedHrBpm;
+            doc["hr_ecg"] = latestEcgHrBpm;
+            doc["hr_ppg"] = latestPpgHrBpm;
+            doc["hr_source"] = heartRateSource(latestEcgHrBpm, latestEcgLive, latestPpgHrBpm, latestMaxLive);
+            hasField = true;
+        }
+        else if (latestMaxLive)
+        {
+            doc["hr"] = latestPpgHrBpm;
+            doc["hr_ppg"] = latestPpgHrBpm;
+            doc["hr_source"] = "ppg";
+            hasField = true;
+        }
         if (latestMaxLive)
         {
-            doc["hr"] = latestMaxSnapshot.heartRateBpm;
             doc["spo2"] = latestMaxSnapshot.spo2Percent;
             hasField = true;
         }
@@ -335,12 +1070,18 @@ static void publishTelemetryIfReady(const WifiConfigManager &wifi, const LcdSens
 
 static bool publishCollectData(const WifiConfigManager &wifi, float distMm, float objTemp, float ambTemp)
 {
+    if (!mqttSendEnabled)
+    {
+        Serial.println("[MQTT][collect] SEND=OFF, publish skipped.");
+        return false;
+    }
+
     if (!ensureMqttConnected(wifi))
     {
         return false;
     }
 
-    StaticJsonDocument<320> doc;
+    StaticJsonDocument<384> doc;
     doc["device_id"] = mqttDeviceId;
     doc["mode"] = "collect";
     doc["ts"] = millis();
@@ -370,14 +1111,29 @@ static bool publishCollectData(const WifiConfigManager &wifi, float distMm, floa
     return ok;
 }
 
-static bool publishMeasureAllData(const WifiConfigManager &wifi, float distMm, float objTemp, float ambTemp, int hr, int spo2, float ecg)
+static bool publishMeasureAllData(const WifiConfigManager &wifi,
+                                  float distMm,
+                                  float objTemp,
+                                  float ambTemp,
+                                  int hr,
+                                  int hrEcg,
+                                  int hrPpg,
+                                  const char *hrSource,
+                                  int spo2,
+                                  float ecg)
 {
+    if (!mqttSendEnabled)
+    {
+        Serial.println("[MQTT][measure_all] SEND=OFF, publish skipped.");
+        return false;
+    }
+
     if (!ensureMqttConnected(wifi))
     {
         return false;
     }
 
-    StaticJsonDocument<320> doc;
+    StaticJsonDocument<448> doc;
     doc["device_id"] = mqttDeviceId;
     doc["mode"] = "measure_all";
     doc["ts"] = millis();
@@ -385,6 +1141,9 @@ static bool publishMeasureAllData(const WifiConfigManager &wifi, float distMm, f
     doc["temp"] = objTemp;
     doc["ambient"] = ambTemp;
     doc["hr"] = hr;
+    doc["hr_ecg"] = hrEcg;
+    doc["hr_ppg"] = hrPpg;
+    doc["hr_source"] = hrSource ? hrSource : "none";
     doc["spo2"] = spo2;
     doc["ecg"] = ecg;
 
@@ -1014,6 +1773,21 @@ static void collect_perform_measurement(const WifiConfigManager &wifi)
 
 static void measure_all_once(const WifiConfigManager &wifi)
 {
+    if (!mqttSendEnabled)
+    {
+        ui_set_measure_all_status("SEND OFF - PRESS ENTER", 0xFFB300);
+        return;
+    }
+
+    if (!sensorRuntime.mlxConnected())
+    {
+        ui_datacollector_show_popup("SENSOR", "MLX90614 not ready",
+                                    lv_palette_main(LV_PALETTE_RED), false);
+        delay(1000);
+        ui_datacollector_hide_popup();
+        return;
+    }
+
     ui_set_measure_all_status("SENDING...", 0xFFB300);
 
     bool sent = publishMeasureAllData(wifi,
@@ -1021,6 +1795,9 @@ static void measure_all_once(const WifiConfigManager &wifi)
                                       measureAllPendingObj,
                                       measureAllPendingAmb,
                                       measureAllPendingHr,
+                                      latestEcgHrBpm,
+                                      latestPpgHrBpm,
+                                      heartRateSource(latestEcgHrBpm, latestEcgLive, latestPpgHrBpm, latestMaxLive),
                                       measureAllPendingSpo2,
                                       measureAllPendingEcg);
     if (sent)
@@ -1053,6 +1830,8 @@ static void measure_all_prepare()
     int hr = maxSnap.signalReady ? maxSnap.heartRateBpm : 0;
     int spo2 = maxSnap.signalReady ? maxSnap.spo2Percent : 0;
     bool ecgLive = sensorRuntime.ad8232Ready() && ecgSnap.sensorReady && ecgSnap.signalReady;
+    int ecgHr = effectiveEcgHeartRate(ecgLive, ecgSnap.heartRateBpm);
+    hr = fuseHeartRate(ecgHr, ecgLive, hr, maxSnap.signalReady);
     float ecgVal = ecgLive ? getECGFilteredSignal() : 0.0f;
 
     measureAllPendingDist = distMm;
@@ -1078,10 +1857,32 @@ void ecgSamplingTask(void *pvParameters)
         // Keep ECG sampling at 250Hz only when ECG screen is active.
         // This prevents ADS1115/I2C retries from degrading menu/dashboard responsiveness.
         sensorRuntime.updateEcgBackground(ecgActive);
+        if (ecgActive)
+        {
+            const SensorSnapshot ecgSnap = sensorRuntime.ecgSnapshot();
+            if (sensorRuntime.ad8232Ready() && ecgSnap.sensorReady && ecgSnap.signalReady)
+            {
+                const float filteredMv = getECGFilteredSignal();
+                latestEcgLcdY = mapEcgMvToLcdY(filteredMv, true);
+                ecgLcdQueuePush(latestEcgLcdY);
+                ecgFramePush(filteredMv, latestEcgLcdY);
+            }
+            else
+            {
+                latestEcgLcdY = mapEcgMvToLcdY(0.0f, false);
+                ecgLcdQueueReset();
+            }
+        }
+        else
+        {
+            latestEcgLcdY = mapEcgMvToLcdY(0.0f, false);
+            ecgLcdQueueReset();
+        }
 
         const TickType_t periodTicks = pdMS_TO_TICKS(ecgActive ? ECG_SAMPLE_UPDATE_MS : ECG_IDLE_SAMPLE_MS);
         vTaskDelayUntil(&lastWake, periodTicks);
     }
+
 }
 
 void maxSamplingTask(void *pvParameters)
@@ -1162,7 +1963,7 @@ void guiTask(void *pvParameters)
     mqttPublishTopic = String("vitals/") + mqttDeviceId + "/data";
     syncMqttBrokerConfig(wifiConfigManager);
     mqttClient.setKeepAlive(20);
-    mqttClient.setSocketTimeout(3);
+    mqttClient.setSocketTimeout(1);
     mqttClient.setBufferSize(MQTT_PAYLOAD_BUFFER);
     Serial.printf("[MQTT] Device ID: %s\n", mqttDeviceId.c_str());
     Serial.printf("[MQTT] Publish topic: %s\n", mqttPublishTopic.c_str());
@@ -1189,6 +1990,14 @@ void guiTask(void *pvParameters)
         lv_timer_handler();
         wifiConfigManager.update();
         mqttClient.loop();
+        if (ecgAiBridge.windowReady())
+        {
+            float aiWindow[AI_WINDOW];
+            if (ecgAiBridge.getWindow(aiWindow))
+            {
+                publishAiTrainingWindow(aiWindow, AI_WINDOW);
+            }
+        }
         const bool mlxSamplingRequired = is_temp_screen(current_screen_type) ||
                                          (current_screen_type == SCR_MONITOR) ||
                                          (current_screen_type == SCR_COLLECTDATA) ||
@@ -1312,9 +2121,36 @@ void guiTask(void *pvParameters)
             else if (current_screen_type == SCR_MEASUREALL)
             {
                 Serial.println("[MEASURE_ALL] Entered measure all screen.");
-                collect_ensure_lox_ready();
-                sensorRuntime.beginMax30102();
-                ui_set_measure_all_status("ENTER: TOGGLE SEND", 0xAAAAAA);
+                const bool loxReady = collect_ensure_lox_ready();
+                const bool maxReady = sensorRuntime.beginMax30102();
+                bool ad8232Ready = sensorRuntime.beginAd8232();
+                Serial.printf("[MEASURE_ALL] AD8232/ADS1115 %s.\n", ad8232Ready ? "ready" : "not ready");
+                if (!loxReady || !maxReady || !sensorRuntime.mlxConnected() || !ad8232Ready)
+                {
+                    char missing[80] = "MISS:";
+                    size_t missLen = strlen(missing);
+                    if (!loxReady)
+                    {
+                        missLen += snprintf(missing + missLen, sizeof(missing) - missLen, " VL53");
+                    }
+                    if (!maxReady)
+                    {
+                        missLen += snprintf(missing + missLen, sizeof(missing) - missLen, " MAX");
+                    }
+                    if (!sensorRuntime.mlxConnected())
+                    {
+                        missLen += snprintf(missing + missLen, sizeof(missing) - missLen, " MLX");
+                    }
+                    if (!ad8232Ready)
+                    {
+                        missLen += snprintf(missing + missLen, sizeof(missing) - missLen, " ECG");
+                    }
+                    ui_set_measure_all_status(missing, 0xFF5252);
+                }
+                else
+                {
+                    ui_set_measure_all_status("READY - ENTER SEND ON", 0x00E676);
+                }
             }
 
             refresh_wifi_header_ui(wifiConfigManager);
@@ -1333,6 +2169,7 @@ void guiTask(void *pvParameters)
             if (!ecgLive)
             {
                 latestEcgSample = 0.0f;
+                latestEcgHrBpm = 0;
                 ui_update_ecg_live(100.0f, 0, false); // đường phẳng giữa khi leads off
             }
             else
@@ -1342,29 +2179,35 @@ void guiTask(void *pvParameters)
                 const float filt = getECGFilteredSignal();
 
                 // Kiểm tra mẫu mới để tránh vẽ lại khi I2C stall
-                static float lastDrawFilt = -99999.0f;
-                if (filt == lastDrawFilt)
-                {
-                    goto ecg_ui_done; // không có mẫu mới, bỏ qua frame này
-                }
-                lastDrawFilt = filt;
                 latestEcgSample = filt;
+                const int ecgHr = effectiveEcgHeartRate(true, e.heartRateBpm);
+                latestEcgHrBpm = ecgHr;
 
                 // FIX: KHÔNG normalize ecgEnvelope ở đây nữa.
                 // Trước đây lcd.cpp normalize filt→chartY rồi ui.cpp lại envelope+normalize lần 2.
                 // Double-normalize làm xẹp đỉnh QRS nghiêm trọng.
                 // Bây giờ: pass thẳng filt (mV) vào ui_update_ecg_live, để ui.cpp xử lý 1 lần duy nhất.
-                ui_update_ecg_live(filt, e.heartRateBpm, true);
+                uint8_t queuedY = latestEcgLcdY;
+                if (ecgLcdQueuePopLatest(queuedY))
+                {
+                    ui_update_ecg_lcd_point(queuedY, ecgHr, true);
+                }
+                else
+                {
+                    ui_update_ecg_lcd_point(latestEcgLcdY, ecgHr, true);
+                }
 
                 if (millis() - lastEcgLiveLog >= ECG_LOG_INTERVAL_MS)
                 {
                     lastEcgLiveLog = millis();
                     // Log filt trực tiếp để debug; chartY do ui.cpp tính
-                    Serial.printf("[ECG] Raw=%.2f Filt=%.2f HR=%d\n",
-                                  getECGRawSignal(), filt, e.heartRateBpm);
+                    const float raw = getECGRawSignal();
+                    logEcgSampleJson("ecg", raw, filt, ecgHr, true, latestEcgLcdY);
                 }
             }
         ecg_ui_done:;
+            publishEcgFrameIfReady(wifiConfigManager, current_screen_type);
+            logEcgFrameDebugIfReady(current_screen_type);
         }
 
         static unsigned long lastUpdate = 0;
@@ -1448,7 +2291,34 @@ void guiTask(void *pvParameters)
             {
                 if (is_publish_screen(current_screen_type))
                 {
-                    mqttSendEnabled = !mqttSendEnabled;
+                    const bool requestEnable = !mqttSendEnabled;
+                    if (requestEnable && WiFi.status() != WL_CONNECTED)
+                    {
+                        mqttSendEnabled = false;
+                        ui_set_mqtt_status("NO WIFI", 0xFF5252);
+                        if (current_screen_type == SCR_MEASUREALL)
+                        {
+                            ui_set_measure_all_status("NO WIFI - CONFIG FIRST", 0xFF5252);
+                        }
+                        Serial.printf("[MQTT][CTRL] %s SEND blocked: WiFi offline\n",
+                                      screen_name(current_screen_type));
+                        continue;
+                    }
+
+                    if (requestEnable && (wifiConfigManager.mqttUser().isEmpty() || wifiConfigManager.mqttPass().isEmpty()))
+                    {
+                        mqttSendEnabled = false;
+                        ui_set_mqtt_status("NO AUTH", 0xFF5252);
+                        if (current_screen_type == SCR_MEASUREALL)
+                        {
+                            ui_set_measure_all_status("MQTT AUTH MISSING", 0xFF5252);
+                        }
+                        Serial.printf("[MQTT][CTRL] %s SEND blocked: missing MQTT credentials\n",
+                                      screen_name(current_screen_type));
+                        continue;
+                    }
+
+                    mqttSendEnabled = requestEnable;
                     Serial.printf("[MQTT][CTRL] %s SEND => %s\n",
                                   screen_name(current_screen_type),
                                   mqttSendEnabled ? "ON" : "OFF");
@@ -1688,13 +2558,17 @@ void guiTask(void *pvParameters)
 
             if (current_screen_type == SCR_MEASUREALL)
             {
+                static unsigned long lastMeasureAllEcgLog = 0;
                 float liveTemp = sensorRuntime.mlxReady() ? sensorRuntime.mlxBodyTempC() : -1.0f;
                 SensorSnapshot maxSnap = sensorRuntime.maxSnapshot();
                 SensorSnapshot ecgSnap = sensorRuntime.ecgSnapshot();
-                int hr = maxSnap.signalReady ? maxSnap.heartRateBpm : 0;
+                const int ppgHr = maxSnap.signalReady ? maxSnap.heartRateBpm : 0;
                 int spo2 = maxSnap.signalReady ? maxSnap.spo2Percent : 0;
                 bool ecgLive = sensorRuntime.ad8232Ready() && ecgSnap.sensorReady && ecgSnap.signalReady;
+                const int ecgHr = effectiveEcgHeartRate(ecgLive, ecgSnap.heartRateBpm);
+                const int hr = fuseHeartRate(ecgHr, ecgLive, ppgHr, maxSnap.signalReady);
                 float ecgVal = ecgLive ? getECGFilteredSignal() : 0.0f;
+                const int ecgChart = ecgLive ? latestEcgLcdY : 100;
                 collectLastDistance = collect_live_distance();
 
                 float displayDist = collectLastDistance;
@@ -1702,10 +2576,14 @@ void guiTask(void *pvParameters)
                 // Cập nhật latestEcgLive/latestEcgSample để publishTelemetryIfReady dùng
                 latestEcgLive = ecgLive;
                 latestEcgSample = ecgVal;
+                latestEcgHrBpm = ecgHr;
+                latestPpgHrBpm = ppgHr;
+                latestFusedHrBpm = hr;
                 if (maxSnap.signalReady)
                 {
                     latestMaxLive = true;
                     latestMaxSnapshot = maxSnap;
+                    latestMaxSnapshot.heartRateBpm = hr;
                 }
                 else
                 {
@@ -1713,6 +2591,26 @@ void guiTask(void *pvParameters)
                 }
 
                 ui_set_measure_all_values(liveTemp, hr, spo2, ecgVal, displayDist);
+                publishEcgFrameIfReady(wifiConfigManager, current_screen_type);
+                logEcgFrameDebugIfReady(current_screen_type);
+                const bool frameSentRecently = lastEcgFramePublishOk && (millis() - lastEcgFramePublishAt < 1200);
+                const float frameP2pMv = (lastEcgFrameMaxMv100 - lastEcgFrameMinMv100) / 100.0f;
+                ui_update_measure_all_ecg_status(ecgLive,
+                                                 mqttSendEnabled,
+                                                 ecgVal,
+                                                 hr,
+                                                 frameSentRecently,
+                                                 lastEcgFramePublishN,
+                                                 frameP2pMv,
+                                                 lastEcgFrameClipPct);
+
+                if (millis() - lastMeasureAllEcgLog >= ECG_DEBUG_JSON_INTERVAL_MS)
+                {
+                    lastMeasureAllEcgLog = millis();
+                    const float raw = getECGRawSignal();
+                    logEcgSampleJson("measure_all", raw, ecgVal, ecgHr, ecgLive, ecgChart);
+                }
+
                 publishTelemetryIfReady(wifiConfigManager, sensorRuntime, current_screen_type);
                 continue;
             }
@@ -1847,11 +2745,13 @@ void guiTask(void *pvParameters)
             {
                 latestMaxLive = true;
                 latestMaxSnapshot = s;
+                latestPpgHrBpm = s.heartRateBpm;
                 ui_update_sensors(tempForUi, s.heartRateBpm, s.spo2Percent, s.waveform);
             }
             else
             {
                 latestMaxLive = false;
+                latestPpgHrBpm = 0;
                 ui_update_sensors(tempForUi, 0, 0, 50);
             }
 

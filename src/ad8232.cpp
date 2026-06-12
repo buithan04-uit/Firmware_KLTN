@@ -29,6 +29,7 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <Adafruit_ADS1X15.h>
+#include "ecg_ai_bridge.h"
 
 // ==========================================
 // CẤU HÌNH CHÂN
@@ -56,10 +57,12 @@
 // LPF_ALPHA_QRS không nên quá thấp (<0.50) vì sẽ bypass filter → spike passthrough
 #define LPF_ALPHA_QUIET 0.82f
 #define LPF_ALPHA_QRS 0.55f
-#define QRS_SLOPE_THRESHOLD_MV 25.0f
+// OPT-2: Tăng ngưỡng từ 25→60mV để tránh LPF switching liên tục do noise floor
+// 60mV/sample tương ứng sườn QRS thật sau notch filter tại 250Hz
+#define QRS_SLOPE_THRESHOLD_MV 60.0f
 // Spike gate: giới hạn bước nhảy của filteredSignal để ngăn transient HPF gây spike
-// QRS thực tế tăng ~200-400mV trong 1 mẫu (4ms). Artefact có thể >800mV/sample
-#define FILT_MAX_STEP_MV 450.0f
+// OPT-1: Giảm từ 450→200mV — QRS thật tối đa ~200mV/sample, spike log >400 đều là artefact
+#define FILT_MAX_STEP_MV 200.0f
 
 // 50Hz notch @ Fs=250Hz (biquad, Q~10) để giảm nhiễu điện lưới
 #define NOTCH_B0 0.95459f
@@ -75,13 +78,17 @@
 // ==========================================
 // PHÁT HIỆN NHỊP TIM (R-R Interval)
 // ==========================================
-#define HR_REFRACTORY_MS 380 // 380ms → tối đa ~158 BPM, giảm miss-peak khi HR cao
+// OPT-6: Tăng HR_REFRACTORY_MS 380→450ms để tránh đếm sóng T giả
+#define HR_REFRACTORY_MS 450 // 450ms → tối đa ~133 BPM, giảm T-wave false detection
 #define HR_TIMEOUT_MS 5000   // 5s timeout, ổn định hơn khi tín hiệu yếu ngắn hạn
 #define HR_MIN_BPM 40
-#define HR_MAX_BPM 150
+#define HR_MAX_BPM 133
+#define HR_ARTIFACT_REJECT_MV 900.0f
 #define HR_STARTUP_BLANK_MS 600 // FIX: rút ngắn 850→600ms để bắt nhịp sớm hơn
-#define HR_RR_BUFFER 6          // FIX: 8→6, ổn định hơn với ít nhịp ban đầu
-#define HR_BPM_LP_ALPHA 0.60f   // FIX: 0.68→0.60, phản hồi nhanh hơn
+// OPT-6: Tăng RR buffer 6→8 để trung bình nhiều nhịp hơn, HR ổn định hơn
+#define HR_RR_BUFFER 8
+// OPT-6: Tăng LP alpha 0.60→0.75 để HR display ổn định, giảm nhảy số trên LCD
+#define HR_BPM_LP_ALPHA 0.75f
 
 // ==========================================
 // BIẾN TOÀN CỤC
@@ -300,13 +307,24 @@ float applyHighPassFilter(float input)
 // ==========================================
 // Smooths signal, removes high-frequency noise >40Hz
 // y[n] = alpha * y[n-1] + (1 - alpha) * x[n]
+// OPT-2: Thêm hold counter để tránh switching liên tục (hysteresis)
 float applyLowPassFilter(float input)
 {
     static float prevInput = 0;
+    static uint8_t qrsHoldCount = 0;
     float slope = fabsf(input - prevInput);
     prevInput = input;
 
-    float alpha = (slope > QRS_SLOPE_THRESHOLD_MV) ? LPF_ALPHA_QRS : LPF_ALPHA_QUIET;
+    if (slope > QRS_SLOPE_THRESHOLD_MV)
+    {
+        qrsHoldCount = 6; // giữ QRS mode 6 mẫu (~24ms) sau khi slope xuống
+    }
+    else if (qrsHoldCount > 0)
+    {
+        qrsHoldCount--;
+    }
+
+    float alpha = (qrsHoldCount > 0) ? LPF_ALPHA_QRS : LPF_ALPHA_QUIET;
     lpfPrevOutput = alpha * lpfPrevOutput + (1.0f - alpha) * input;
     return lpfPrevOutput;
 }
@@ -409,6 +427,8 @@ void readAndFilterECG()
             lastWarning = millis();
             Serial.println("[ECG] LEADS DISCONNECTED");
         }
+
+        ecgAiBridge.reset();
         return;
     }
 
@@ -477,6 +497,12 @@ void readAndFilterECG()
     lastRawMv = rawMv;
     rawSignal = rawMv;
 
+    //     // AI PATH: push vào bridge TRƯỚC khi qua spike gate display
+    //     // rawMv đã qua step-clamp 300mV nhưng chưa qua adaptive LPF.
+    //     // Bridge có filter riêng (HPF+Notch+LPF cố định), không spike gate.
+    if (leadsConnected)
+        ecgAiBridge.pushSample(rawMv);
+
     // Nhánh lọc thông minh:
     // - notch 50Hz để triệt nhiễu điện lưới
     // - hrInputSignal: lọc nhẹ riêng cho detector
@@ -532,7 +558,10 @@ void detectHeartRate()
     }
 
     unsigned long now = millis();
-    float absCurr = fabsf(hrInputSignal);
+    // OPT-3: Bỏ fabsf() — chỉ detect đỉnh DƯƠNG (sóng R thật sau HPF).
+    // fabsf() biến sóng T và noise âm thành peak dương giả → đếm nhịp sai.
+    // Sóng R sau HPF luôn dương khi điện cực đặt đúng (LA-RA hoặc single-lead).
+    float absCurr = hrInputSignal; // không dùng fabsf
 
     if (hrFirstValidMs == 0)
         hrFirstValidMs = now;
@@ -544,11 +573,12 @@ void detectHeartRate()
         return;
     }
 
-    derivBaseline = derivBaseline * 0.996f + absCurr * 0.004f;
-    hrEnvelope = hrEnvelope * 0.994f + absCurr * 0.006f;
+    // Chỉ tính envelope trên phần dương để tránh bias từ noise âm
+    absCurr = fabsf(hrInputSignal);
+    float absCurrForEnv = fabsf(hrInputSignal);
+    derivBaseline = derivBaseline * 0.996f + absCurrForEnv * 0.004f;
+    hrEnvelope = hrEnvelope * 0.994f + absCurrForEnv * 0.006f;
 
-    // FIX: Hạ threshold để bắt đỉnh thực tế sau LPF nới
-    // Trước: threshold=[9,95], quá rộng khi tín hiệu đã bị nhiều tầng lọc
     float thresholdByDeriv = derivBaseline * 1.50f;
     float thresholdByEnv = hrEnvelope * 1.35f;
     float threshold = fmaxf(thresholdByDeriv, thresholdByEnv);
@@ -562,6 +592,14 @@ void detectHeartRate()
     float prominenceGate = fmaxf(4.0f, threshold * 0.20f);
     bool prominenceOk = prominence > prominenceGate;
     bool timeOk = (lastRPeakTime == 0) || (now - lastRPeakTime >= HR_REFRACTORY_MS);
+    bool artifactOk = hrPrevAbs1 < HR_ARTIFACT_REJECT_MV;
+
+    if (localPeak && prominenceOk && hrPrevAbs1 > threshold && !artifactOk)
+    {
+        hrPrevAbs2 = hrPrevAbs1;
+        hrPrevAbs1 = absCurr;
+        return;
+    }
 
     if (localPeak && prominenceOk && hrPrevAbs1 > threshold && timeOk)
     {

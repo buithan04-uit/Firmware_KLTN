@@ -219,7 +219,7 @@ extern "C"
         ui_InstructionLabel3 = create_label(ui_FooterPanel, "[DOWN] Reset trial  Hold LEFT: Back", 5, 38,
                                             lv_color_hex(0x9CF3), &lv_font_montserrat_10);
 
-        lv_obj_t *ui_InfoLabel = create_label(ui_FooterPanel, "Giua tran | MLX cach tran 40-50mm | 6 trial/session", 5, 55,
+        lv_obj_t *ui_InfoLabel = create_label(ui_FooterPanel, "Giua tran | Cam bien cach tran 40-50mm | 6 trial/session", 5, 55,
                                               lv_color_hex(0x6B6B), &lv_font_montserrat_10);
 
         // ===== POPUP (HIDDEN) - Professional Design =====

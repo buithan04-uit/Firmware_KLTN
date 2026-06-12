@@ -27,6 +27,7 @@ void ui_init();
 void ui_switch_screen(ScreenType scr);
 void ui_update_sensors(float temp, int hr, int spo2, int ecg_val);
 void ui_update_ecg_live(float ecg_mv, int hr_bpm, bool leads_connected);
+void ui_update_ecg_lcd_point(int waveformY200, int hr_bpm, bool leads_connected);
 void ui_set_ambient_temp(float temp);
 void ui_set_temp_distance(float distMm);
 void ui_set_sensor_status(const char *msg, uint32_t colorHex);
@@ -48,6 +49,14 @@ void ui_set_mqtt_status(const char *msg, uint32_t colorHex);
 void ui_set_measure_all_values(float temp, int hr, int spo2, float ecg, float dist);
 void ui_set_measure_all_status(const char *msg, uint32_t colorHex);
 void ui_input_read(lv_indev_drv_t *drv, lv_indev_data_t *data);
+void ui_update_measure_all_ecg_status(bool leadsOn,
+                                      bool mqttSending,
+                                      float ecgMv,
+                                      int hrBpm,
+                                      bool frameSentRecently,
+                                      uint8_t framePoints,
+                                      float frameP2pMv,
+                                      uint8_t frameClipPct);
 void ui_update_measure_all_ecg_waveform(int waveformY200, bool leadsOn);
 void ui_set_measure_all_send_state(uint8_t state);
 void ui_update_measureall_ecg(float ecg_mv, bool leads_connected);

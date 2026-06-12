@@ -99,7 +99,7 @@ bool LcdSensorRuntime::beginMax30102()
 
 bool LcdSensorRuntime::beginAd8232()
 {
-    if (!ad8232Initialized_)
+    if (!ad8232Initialized_ || !ad8232Ready_)
     {
         ad8232Ready_ = ad8232Module_.begin();
         ad8232Initialized_ = true;
