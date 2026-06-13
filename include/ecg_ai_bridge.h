@@ -46,6 +46,8 @@
 // Lưu ý: MIT-BIH lưu tín hiệu ở đơn vị mV (thực), không phải ADC count
 static constexpr float MITBIH_MEAN = -0.28766632f;
 static constexpr float MITBIH_STD  =  0.52417608f;
+static constexpr float ECG_ANALOG_GAIN_ESTIMATE = 100.0f; // AD8232/module output gain estimate before MIT-BIH normalization
+static constexpr float ECG_AI_POLARITY = 1.0f; // set to -1.0f if the hardware lead orientation inverts R-peaks
 
 // ==========================================
 // CẤU HÌNH RESAMPLE
@@ -146,8 +148,8 @@ private:
 
     // --- Resample state ---
     // Dùng linear interpolation: theo dõi phase tích lũy
-    float resampPhase_;  // phase hiện tại trong khoảng [0, DEVICE_FS/AI_INPUT_FS)
-    float resampPrev_;   // mẫu 250Hz trước đó (để nội suy)
+    int   resampAccum_;  // rational 250Hz -> 360Hz accumulator
+    float resampPrev_;   // previous 250Hz sample for interpolation
 
     // --- Resampled buffer @360Hz (ring buffer) ---
     float rsmpBuf_[AI_RESAMP_BUF_SIZE];
@@ -160,6 +162,8 @@ private:
     float peakPrev2_;    // mẫu [n-2]
     int   refractoryCnt_;
     bool  peakInitDone_;
+    int   pendingPeakIdx_;
+    int   pendingPostSamples_;
 
     // --- Window state ---
     float  window_[AI_WINDOW]; // window đã chuẩn hóa, sẵn sàng gửi

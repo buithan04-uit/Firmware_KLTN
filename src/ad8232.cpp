@@ -48,6 +48,7 @@
 #define ADC_MV_PER_BIT 0.125f
 #define ADC_MIN_VALID 250
 #define ADC_MAX_VALID 32767
+#define ECG_DISPLAY_POLARITY 1.0f // set to -1.0f if MCP6002/lead orientation makes R-peaks point down
 
 // High-pass filter loại bỏ DC offset & baseline drift
 #define HPF_ALPHA 0.983f // fc ≈ 0.7Hz tại 250Hz, giảm baseline wander tốt hơn
@@ -152,16 +153,16 @@ void initAD8232()
     pinMode(LO_MINUS_PIN, INPUT_PULLDOWN);
 
     // 100kHz Standard-mode: ổn định hơn với dây dài (>20cm), tránh Wire Error 263
-    Wire1.begin(I2C_SDA, I2C_SCL);
-    Wire1.setClock(100000);
-    Wire1.setTimeOut(50); // timeout 50ms, tránh block lâu khi bus bị treo
+    adsI2C.begin(I2C_SDA, I2C_SCL);
+    adsI2C.setClock(100000);
+    adsI2C.setTimeOut(50); // timeout 50ms, tránh block lâu khi bus bị treo
     delay(50);
 
     // Retry 3 lần để đảm bảo ADS1115 kịp khởi động (một số board cần thêm thời gian)
     bool found = false;
     for (int attempt = 1; attempt <= 3 && !found; attempt++)
     {
-        found = ads.begin(0x48, &Wire1);
+        found = ads.begin(0x48, &adsI2C);
         if (!found)
         {
             Serial.printf("ADS1115 attempt %d/3 failed, retrying...\n", attempt);
@@ -420,6 +421,7 @@ void readAndFilterECG()
         hrInstantInit = false;
         lastRPeakTime = 0;
         beatDetected = false;
+        buffersInitialized = false;
 
         static unsigned long lastWarning = 0;
         if (millis() - lastWarning >= 5000)
@@ -441,10 +443,10 @@ void readAndFilterECG()
     // Đọc kết quả conversion cuối (continuous mode, không trigger mới → không block)
     int16_t adcValue = ads.getLastConversionResults();
 
-    // Validate: output LM324 quanh 1.5-1.8V → ADC value hợp lệ ~12000-14400
-    // Cho phép rộng hơn: 500 mV (4000) đến 3.8V (30400) để bắt QRS đỉnh
-    const int16_t ADC_VALID_LOW = 2000;   // ~250 mV
-    const int16_t ADC_VALID_HIGH = 32000; // ~4.0V, dưới clip
+    // Validate: output AD8232/MCP6002 thường quanh 1.5–1.8V.
+    // Với mạch 3.3V analog, mẫu gần GND hoặc gần rail thường là lead-off/saturation/glitch.
+    const int16_t ADC_VALID_LOW = 800;    // ~100 mV, dưới vùng hoạt động thực tế của AD8232/MCP6002
+    const int16_t ADC_VALID_HIGH = 27000; // ~3.375V, coi như gần rail 3.3V → bỏ mẫu bão hoà
     if (adcValue < ADC_VALID_LOW || adcValue >= ADC_VALID_HIGH)
     {
         // Mẫu không hợp lệ: KHÔNG dùng giá trị cũ, bỏ qua hoàn toàn
@@ -462,12 +464,12 @@ void readAndFilterECG()
         {
             lastBusRecoveryAtMs = millis();
             Serial.println("[ECG] I2C bus recovery attempt...");
-            Wire1.end();
+            adsI2C.end();
             delay(10);
-            Wire1.begin(I2C_SDA, I2C_SCL);
-            Wire1.setClock(100000);
-            Wire1.setTimeOut(50);
-            if (ads.begin(0x48, &Wire1))
+            adsI2C.begin(I2C_SDA, I2C_SCL);
+            adsI2C.setClock(100000);
+            adsI2C.setTimeOut(50);
+            if (ads.begin(0x48, &adsI2C))
             {
                 ads.setGain(GAIN_ONE);
                 ads.setDataRate(RATE_ADS1115_250SPS);
@@ -497,6 +499,27 @@ void readAndFilterECG()
     lastRawMv = rawMv;
     rawSignal = rawMv;
 
+    // Re-prime filters sau khi vừa lead-off/reconnect hoặc sau lỗi bus để tránh HPF transient lớn.
+    if (!buffersInitialized)
+    {
+        for (int i = 0; i < MOVING_AVG_SIZE; i++) movingAvgBuffer[i] = rawMv;
+        for (int i = 0; i < MEDIAN_FILTER_SIZE; i++) medianBuffer[i] = rawMv;
+        movingAvgIndex = 0;
+        medianIndex = 0;
+        hpfPrevInput = rawMv;
+        hpfPrevOutput = 0.0f;
+        lpfPrevOutput = 0.0f;
+        hrLpfPrevOutput = 0.0f;
+        notch_x1 = rawMv;
+        notch_x2 = rawMv;
+        notch_y1 = rawMv;
+        notch_y2 = rawMv;
+        filteredSignal = 0.0f;
+        hrInputSignal = 0.0f;
+        buffersInitialized = true;
+        return;
+    }
+
     //     // AI PATH: push vào bridge TRƯỚC khi qua spike gate display
     //     // rawMv đã qua step-clamp 300mV nhưng chưa qua adaptive LPF.
     //     // Bridge có filter riêng (HPF+Notch+LPF cố định), không spike gate.
@@ -511,7 +534,7 @@ void readAndFilterECG()
     float ma = applyMovingAverage(rawSignal);
     float conditioned = applyMedianFilter(ma);
     float notch = applyNotch50Hz(conditioned);
-    float ac = applyHighPassFilter(notch);
+    float ac = applyHighPassFilter(notch) * ECG_DISPLAY_POLARITY;
     hrInputSignal = applyHeartRateLPF(ac);
     filteredSignal = applyLowPassFilter(ac);
 
@@ -573,8 +596,8 @@ void detectHeartRate()
         return;
     }
 
-    // Chỉ tính envelope trên phần dương để tránh bias từ noise âm
-    absCurr = fabsf(hrInputSignal);
+    // Detector dùng hrInputSignal có dấu để chỉ nhận R-peak dương.
+    // Envelope vẫn dùng trị tuyệt đối để tự thích nghi biên độ nền.
     float absCurrForEnv = fabsf(hrInputSignal);
     derivBaseline = derivBaseline * 0.996f + absCurrForEnv * 0.004f;
     hrEnvelope = hrEnvelope * 0.994f + absCurrForEnv * 0.006f;

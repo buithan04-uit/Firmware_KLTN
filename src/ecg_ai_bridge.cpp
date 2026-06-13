@@ -32,7 +32,7 @@ void EcgAiBridge::reset()
     rawCount_ = 0;
 
     // Resample
-    resampPhase_ = 0.0f;
+    resampAccum_ = static_cast<int>(DEVICE_FS);
     resampPrev_ = 0.0f;
 
     // Resampled buffer
@@ -47,6 +47,8 @@ void EcgAiBridge::reset()
     peakPrev2_ = 0.0f;
     refractoryCnt_ = 0;
     peakInitDone_ = false;
+    pendingPeakIdx_ = -1;
+    pendingPostSamples_ = 0;
 
     // Window
     for (int i = 0; i < AI_WINDOW; i++)
@@ -99,56 +101,28 @@ float EcgAiBridge::applyLPF(float in)
 
 void EcgAiBridge::pushResampled(float cur250)
 {
-    // Bước pha: mỗi mẫu 250Hz = 1 đơn vị, mỗi mẫu 360Hz = DEVICE_FS/AI_INPUT_FS đơn vị
-    static constexpr float PHASE_STEP = DEVICE_FS / AI_INPUT_FS; // ≈ 0.69444
-
-    // Ta đang tại phase resampPhase_ (đã tích lũy từ mẫu trước)
-    // Xuất tất cả mẫu 360Hz nằm trong khoảng [resampPhase_, resampPhase_ + 1.0)
-    // (bước 1.0 vì ta vừa nhận 1 mẫu 250Hz mới)
-
-    float phaseEnd = resampPhase_ + 1.0f;
-
-    // Mốc 360Hz tiếp theo (tính từ 0) là ceil(resampPhase_ / PHASE_STEP) * PHASE_STEP
-    // Đơn giản hơn: mốc tiếp theo = nextMark_, tăng PHASE_STEP mỗi lần xuất
-
-    // Khởi tạo nextMark_ lần đầu
-    // Ta dùng static local vì chỉ cần 1 instance (singleton)
-    // Nhưng vì có thể reset(), ta tính lại từ resampPhase_
-
-    // nextMark_ = resampPhase_ làm tròn lên đến bội số gần nhất của PHASE_STEP
-    // Sau reset: resampPhase_ = 0, nextMark_ = 0
-
-    float mark = ceilf(resampPhase_ / PHASE_STEP) * PHASE_STEP;
-
-    while (mark < phaseEnd)
+    // Stable rational resampler: output samples are spaced by 250/360 of a
+    // 250Hz sample interval. The integer phase stays bounded and drift-free.
+    if (rawCount_ <= 1)
     {
-        // Nội suy tuyến tính: t = 0 → prev_, t = 1 → cur250
-        // mark nằm trong [resampPhase_, resampPhase_ + 1.0)
-        // → t = (mark - resampPhase_) / 1.0
-        float t = mark - resampPhase_;
-        float sample360 = resampPrev_ + t * (cur250 - resampPrev_);
+        resampPrev_ = cur250;
+        return;
+    }
 
-        // Ghi vào ring buffer 360Hz
+    while (resampAccum_ <= static_cast<int>(AI_INPUT_FS))
+    {
+        const float t = static_cast<float>(resampAccum_) / AI_INPUT_FS;
+        const float sample360 = resampPrev_ + t * (cur250 - resampPrev_);
+
         rsmpBuf_[rsmpHead_] = sample360;
         rsmpHead_ = (rsmpHead_ + 1) & (AI_RESAMP_BUF_SIZE - 1);
         rsmpCount_++;
 
-        // Chạy peak detector trên mẫu 360Hz vừa tạo
         runPeakDetector(sample360);
-
-        mark += PHASE_STEP;
+        resampAccum_ += static_cast<int>(DEVICE_FS);
     }
 
-    resampPhase_ = phaseEnd; // cập nhật phase cho mẫu tiếp theo
-    // Giữ phase trong [0, PHASE_STEP) để tránh drift dài hạn
-    // Khi phaseEnd vượt quá 1 chu kỳ lớn, wrap lại
-    while (resampPhase_ > 1000.0f)
-    {
-        resampPhase_ -= 1000.0f;
-        // cũng phải shift các mark tương ứng — nhưng vì ta tính mark từ resampPhase_ mỗi lần,
-        // không cần làm gì thêm
-    }
-
+    resampAccum_ -= static_cast<int>(AI_INPUT_FS);
     resampPrev_ = cur250;
 }
 
@@ -164,7 +138,24 @@ void EcgAiBridge::pushResampled(float cur250)
 
 void EcgAiBridge::runPeakDetector(float s)
 {
-    // Cập nhật envelope bất đối xứng: bắt đỉnh nhanh, thả chậm
+    // Complete a pending R-centered window only after AI_HALF_WIN future samples arrive.
+    // MIT-BIH training windows are centered on annotated R-peaks, so extracting
+    // immediately at peak time would fill the right half with stale ring-buffer data.
+    if (pendingPeakIdx_ >= 0)
+    {
+        pendingPostSamples_++;
+        if (pendingPostSamples_ >= AI_HALF_WIN)
+        {
+            if (extractWindow(pendingPeakIdx_))
+            {
+                beatCount_++;
+                windowReady_ = true;
+            }
+            pendingPeakIdx_ = -1;
+            pendingPostSamples_ = 0;
+        }
+    }
+
     float absS = fabsf(s);
     if (absS > peakEnv_)
         peakEnv_ = AI_PEAK_ENV_FAST * absS + (1.0f - AI_PEAK_ENV_FAST) * peakEnv_;
@@ -174,7 +165,6 @@ void EcgAiBridge::runPeakDetector(float s)
     if (peakEnv_ < 10.0f)
         peakEnv_ = 10.0f;
 
-    // Khởi động: bỏ qua AI_REFRACTORY_SAMPLES mẫu đầu để filter ổn định
     if (!peakInitDone_)
     {
         if (rsmpCount_ >= AI_REFRACTORY_SAMPLES)
@@ -184,19 +174,11 @@ void EcgAiBridge::runPeakDetector(float s)
         return;
     }
 
-    // Refractory countdown
     if (refractoryCnt_ > 0)
-    {
         refractoryCnt_--;
-        peakPrev2_ = peakPrev1_;
-        peakPrev1_ = s;
-        return;
-    }
 
-    // Local peak: prev1 là đỉnh cục bộ
-    bool isLocalPeak = (peakPrev1_ > peakPrev2_) && (peakPrev1_ > s);
-
-    if (isLocalPeak)
+    const bool isLocalPeak = (peakPrev1_ > peakPrev2_) && (peakPrev1_ > s);
+    if (isLocalPeak && refractoryCnt_ <= 0 && pendingPeakIdx_ < 0)
     {
         float threshold = AI_PEAK_THRESHOLD_RATIO * peakEnv_;
         if (threshold < AI_PEAK_MIN_THRESHOLD)
@@ -204,16 +186,9 @@ void EcgAiBridge::runPeakDetector(float s)
 
         if (peakPrev1_ > threshold)
         {
-            // R-peak detected! Index trong rsmpBuf_ là rsmpHead_ - 2 (đỉnh ở prev1)
-            // (vì ta vừa push s = n, peakPrev1_ = n-1, peakPrev2_ = n-2)
-            int peakIdx = (rsmpHead_ - 2 + AI_RESAMP_BUF_SIZE) & (AI_RESAMP_BUF_SIZE - 1);
-
-            if (extractWindow(peakIdx))
-            {
-                beatCount_++;
-                windowReady_ = true;
-                refractoryCnt_ = AI_REFRACTORY_SAMPLES;
-            }
+            pendingPeakIdx_ = (rsmpHead_ - 2 + AI_RESAMP_BUF_SIZE) & (AI_RESAMP_BUF_SIZE - 1);
+            pendingPostSamples_ = 0;
+            refractoryCnt_ = AI_REFRACTORY_SAMPLES;
         }
     }
 
@@ -266,7 +241,7 @@ bool EcgAiBridge::extractWindow(int peakIdx)
         // còn MIT-BIH lưu tín hiệu ECG thực ở body surface (~0.1-1 mV).
         //
         // FIX: Chia thêm cho hệ số gain AD8232 (~100) trước khi normalize:
-        float mv_body = mv / 100.0f; // Ước tính: output AD8232 ≈ 100× body ECG
+        float mv_body = mv / ECG_ANALOG_GAIN_ESTIMATE;
         window_[i] = (mv_body - MITBIH_MEAN) / MITBIH_STD;
 
         // Clamp để tránh outlier làm mô hình mất ổn định
@@ -286,7 +261,7 @@ bool EcgAiBridge::extractWindow(int peakIdx)
 void EcgAiBridge::pushSample(float rawMv)
 {
     // Filter chain riêng cho AI: HPF → Notch → LPF (không spike gate)
-    float hpf = applyHPF(rawMv);
+    float hpf = applyHPF(rawMv) * ECG_AI_POLARITY;
     float notch = applyNotch(hpf);
     float filtered = applyLPF(notch);
 
