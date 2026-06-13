@@ -1916,7 +1916,6 @@ void ecgSamplingTask(void *pvParameters)
         const TickType_t periodTicks = pdMS_TO_TICKS(ecgActive ? ECG_SAMPLE_UPDATE_MS : ECG_IDLE_SAMPLE_MS);
         vTaskDelayUntil(&lastWake, periodTicks);
     }
-
 }
 
 void maxSamplingTask(void *pvParameters)
