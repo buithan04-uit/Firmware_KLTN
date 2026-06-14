@@ -93,6 +93,11 @@ void LcdSensorRuntime::updateEcgBackground(bool enableEcgUpdate)
 
 bool LcdSensorRuntime::beginMax30102()
 {
+    if (maxReady_)
+    {
+        return true;
+    }
+
     maxReady_ = max30102Module_.begin();
     return maxReady_;
 }

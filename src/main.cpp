@@ -1865,8 +1865,15 @@ static void measure_all_prepare()
     int spo2 = maxSnap.signalReady ? maxSnap.spo2Percent : 0;
     bool ecgLive = sensorRuntime.ad8232Ready() && ecgSnap.sensorReady && ecgSnap.signalReady;
     int ecgHr = effectiveEcgHeartRate(ecgLive, ecgSnap.heartRateBpm);
-    hr = fuseHeartRate(ecgHr, ecgLive, hr, maxSnap.signalReady);
-    float ecgVal = ecgLive ? getECGFilteredSignal() : 0.0f;
+
+    if (latestEcgLive && latestEcgHrBpm > 0)
+    {
+        ecgHr = latestEcgHrBpm;
+    }
+
+    hr = fuseHeartRate(ecgHr, ecgLive || latestEcgLive, hr, maxSnap.signalReady);
+
+    float ecgVal = (ecgLive || latestEcgLive) ? latestEcgSample : 0.0f;
 
     measureAllPendingDist = distMm;
     measureAllPendingObj = objTemp;
