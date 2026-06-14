@@ -13,7 +13,8 @@ Mlx90614SensorModule::Mlx90614SensorModule(uint8_t sdaPin, uint8_t sclPin)
       ambientTempC_(-999.0f),
       objectFilterSum_(0.0f),
       objectFilterIndex_(0),
-      objectFilterCount_(0)
+      objectFilterCount_(0),
+      targetDistanceMm_(-1.0f)
 {
     for (uint8_t i = 0; i < kObjectFilterSize; ++i)
     {
@@ -163,6 +164,11 @@ float Mlx90614SensorModule::ambientTempC() const
     return ambientTempC_;
 }
 
+void Mlx90614SensorModule::setTargetDistanceMm(float distanceMm)
+{
+    targetDistanceMm_ = distanceMm;
+}
+
 void Mlx90614SensorModule::ensureI2cConfigured()
 {
     Wire.setClock(kI2CFrequencyHz);
@@ -191,7 +197,7 @@ float Mlx90614SensorModule::pushAndGetFilteredObjectTemp(float rawObjectTempC)
     return objectFilterSum_ / static_cast<float>(objectFilterCount_);
 }
 
-float Mlx90614SensorModule::compensateBodyTemp(float objectTempC, float ambientTempC)
+float Mlx90614SensorModule::compensateBodyTemp(float objectTempC, float ambientTempC) const
 {
     // Ambient compensation: in a cold room more heat radiates away between the
     // skin and the sensor, so the raw reading under-reports actual skin temp.
@@ -199,6 +205,23 @@ float Mlx90614SensorModule::compensateBodyTemp(float objectTempC, float ambientT
     if (ambientTempC < 25.0f)
     {
         skinTempC += (25.0f - ambientTempC) * 0.1f;
+    }
+
+    // Distance compensation: the MLX90614's ~35 deg FOV spot grows with
+    // distance, increasingly mixing in cooler surrounding air/background
+    // instead of pure skin, so the raw reading drops as the sensor moves
+    // away from the forehead. The calibration curve below was characterized
+    // at a reference distance of ~30mm, so add back the estimated loss for
+    // larger distances (clamped to a plausible range).
+    if (targetDistanceMm_ > 0.0f && targetDistanceMm_ < 200.0f)
+    {
+        constexpr float kRefDistanceMm = 30.0f;
+        constexpr float kDistanceCoeffCPerMm = 0.02f; // ~0.2 C per extra cm
+        const float extraDistanceMm = targetDistanceMm_ - kRefDistanceMm;
+        if (extraDistanceMm > 0.0f)
+        {
+            skinTempC += constrain(extraDistanceMm * kDistanceCoeffCPerMm, 0.0f, 2.5f);
+        }
     }
 
     // Forehead/skin IR temperature reads below oral/core temperature, and the

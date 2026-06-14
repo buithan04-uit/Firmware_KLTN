@@ -180,6 +180,11 @@ float LcdSensorRuntime::mlxAmbientTempC() const
     return mlxAmbientTempC_;
 }
 
+void LcdSensorRuntime::setMlxTargetDistanceMm(float distanceMm)
+{
+    mlx90614Module_.setTargetDistanceMm(distanceMm);
+}
+
 SensorSnapshot LcdSensorRuntime::maxSnapshot() const
 {
     portENTER_CRITICAL(&maxMux_);

@@ -2091,6 +2091,17 @@ void guiTask(void *pvParameters)
                                          (current_screen_type == SCR_MONITOR) ||
                                          (current_screen_type == SCR_COLLECTDATA) ||
                                          (current_screen_type == SCR_MEASUREALL);
+
+        // Feed the live VL53L0X distance into the MLX90614 calibration so
+        // compensateBodyTemp() can correct for the IR spot cooling as the
+        // sensor moves away from the forehead.
+        static unsigned long lastMlxDistanceUpdate = 0;
+        if (mlxSamplingRequired && millis() - lastMlxDistanceUpdate >= 200)
+        {
+            lastMlxDistanceUpdate = millis();
+            sensorRuntime.setMlxTargetDistanceMm(collect_live_distance());
+        }
+
         updateTp5100ChargeStatus();
         if (xSemaphoreTake(i2c0Mutex, pdMS_TO_TICKS(10)) == pdTRUE)
         {
@@ -2697,6 +2708,7 @@ void guiTask(void *pvParameters)
                                                  lastEcgFramePublishN,
                                                  frameP2pMv,
                                                  lastEcgFrameClipPct);
+                ui_update_measureall_ecg(ecgVal, ecgLive);
                 (void)ecgChart;
 
                 if (millis() - lastMeasureAllEcgLog >= ECG_DEBUG_JSON_INTERVAL_MS)
