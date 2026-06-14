@@ -2094,12 +2094,17 @@ void guiTask(void *pvParameters)
 
         // Feed the live VL53L0X distance into the MLX90614 calibration so
         // compensateBodyTemp() can correct for the IR spot cooling as the
-        // sensor moves away from the forehead.
+        // sensor moves away from the forehead. This is the ONLY VL53L0X read
+        // on the main loop (throttled to 200ms) — SCR_MEASUREALL reuses
+        // collectLastDistance instead of doing its own blocking ranging read
+        // every iteration, which used to stall guiTask (MQTT/UI/ecg_frame
+        // publish) for tens of ms per loop while on that screen.
         static unsigned long lastMlxDistanceUpdate = 0;
         if (mlxSamplingRequired && millis() - lastMlxDistanceUpdate >= 200)
         {
             lastMlxDistanceUpdate = millis();
-            sensorRuntime.setMlxTargetDistanceMm(collect_live_distance());
+            collectLastDistance = collect_live_distance();
+            sensorRuntime.setMlxTargetDistanceMm(collectLastDistance);
         }
 
         updateTp5100ChargeStatus();
@@ -2669,8 +2674,9 @@ void guiTask(void *pvParameters)
                 const int hr = fuseHeartRate(ecgHr, ecgLive, ppgHr, maxSnap.signalReady);
                 float ecgVal = ecgLive ? getECGFilteredSignal() : 0.0f;
                 const int ecgChart = ecgLive ? latestEcgLcdY : 100;
-                collectLastDistance = collect_live_distance();
-
+                // collectLastDistance được làm mới mỗi 200ms ở phía trên (vòng lặp
+                // chính) — không đọc VL53L0X lại ở đây để tránh chặn guiTask
+                // (MQTT/UI/publish ecg_frame) bằng một lần ranging blocking mỗi tick.
                 float displayDist = collectLastDistance;
 
                 // Cập nhật latestEcgLive/latestEcgSample để publishTelemetryIfReady dùng
@@ -2690,24 +2696,33 @@ void guiTask(void *pvParameters)
                     latestMaxLive = false;
                 }
 
-                ui_set_measure_all_values(liveTemp, hr, spo2, ecgVal, displayDist);
-
                 // Keep streaming ecg_frame/ecg_ai_window while on MeasureAll so the
                 // web's realtime ECG chart doesn't stall when switching away from the
                 // ECG monitor screen. Only the on-device waveform drawing is skipped
                 // here (this screen shows transmission status + values only).
                 publishEcgFrameIfReady(wifiConfigManager, current_screen_type);
                 logEcgFrameDebugIfReady(current_screen_type);
-                const bool frameSentRecently = lastEcgFramePublishOk && (millis() - lastEcgFramePublishAt < 1200);
-                const float frameP2pMv = (lastEcgFrameMaxMv100 - lastEcgFrameMinMv100) / 100.0f;
-                ui_update_measure_all_ecg_status(ecgLive,
-                                                 mqttSendEnabled,
-                                                 ecgVal,
-                                                 hr,
-                                                 frameSentRecently,
-                                                 lastEcgFramePublishN,
-                                                 frameP2pMv,
-                                                 lastEcgFrameClipPct);
+
+                // Cập nhật LVGL chỉ mỗi SENSOR_UI_UPDATE_MS: vòng lặp chính giờ chạy
+                // nhanh hơn nhiều (không còn bị chặn bởi VL53L0X mỗi tick), nên cần
+                // giới hạn tần suất vẽ UI để dành thời gian cho mqttClient.loop()/
+                // publish ecg_frame.
+                static unsigned long lastMeasureAllUiUpdate = 0;
+                if (millis() - lastMeasureAllUiUpdate >= SENSOR_UI_UPDATE_MS)
+                {
+                    lastMeasureAllUiUpdate = millis();
+                    ui_set_measure_all_values(liveTemp, hr, spo2, ecgVal, displayDist);
+                    const bool frameSentRecently = lastEcgFramePublishOk && (millis() - lastEcgFramePublishAt < 1200);
+                    const float frameP2pMv = (lastEcgFrameMaxMv100 - lastEcgFrameMinMv100) / 100.0f;
+                    ui_update_measure_all_ecg_status(ecgLive,
+                                                     mqttSendEnabled,
+                                                     ecgVal,
+                                                     hr,
+                                                     frameSentRecently,
+                                                     lastEcgFramePublishN,
+                                                     frameP2pMv,
+                                                     lastEcgFrameClipPct);
+                }
                 (void)ecgChart;
 
                 if (millis() - lastMeasureAllEcgLog >= ECG_DEBUG_JSON_INTERVAL_MS)
