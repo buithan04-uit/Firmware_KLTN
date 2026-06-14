@@ -132,8 +132,11 @@ void Mlx90614SensorModule::update()
 
     readErrorCount_ = 0;
 
-    // Raw mode for LCD: expose direct MLX object/ambient values with no smoothing
-    currentSnapshot_.bodyTempC = objectTempC;
+    // Smooth the raw object temperature (10-sample moving average @ ~1.5s
+    // interval = ~15s window) before calibration, since IR readings are noisy
+    // sample-to-sample but body temperature changes slowly.
+    const float filteredObjectTempC = pushAndGetFilteredObjectTemp(objectTempC);
+    currentSnapshot_.bodyTempC = compensateBodyTemp(filteredObjectTempC, ambientTempC);
     ambientTempC_ = ambientTempC;
 
     currentSnapshot_.sensorReady = true;
@@ -142,9 +145,11 @@ void Mlx90614SensorModule::update()
     if (nowMs - lastDiagLogAtMs >= 1500)
     {
         lastDiagLogAtMs = nowMs;
-        Serial.printf("[MLX90614] RAW obj=%.2f amb=%.2f\n",
-                      currentSnapshot_.bodyTempC,
-                      ambientTempC_);
+        Serial.printf("[MLX90614] obj_raw=%.2f obj_filt=%.2f amb=%.2f body_cal=%.2f\n",
+                      objectTempC,
+                      filteredObjectTempC,
+                      ambientTempC_,
+                      currentSnapshot_.bodyTempC);
     }
 }
 
@@ -188,22 +193,58 @@ float Mlx90614SensorModule::pushAndGetFilteredObjectTemp(float rawObjectTempC)
 
 float Mlx90614SensorModule::compensateBodyTemp(float objectTempC, float ambientTempC)
 {
-    float bodyTemp = objectTempC;
-
+    // Ambient compensation: in a cold room more heat radiates away between the
+    // skin and the sensor, so the raw reading under-reports actual skin temp.
+    float skinTempC = objectTempC;
     if (ambientTempC < 25.0f)
     {
-        bodyTemp += (25.0f - ambientTempC) * 0.1f;
+        skinTempC += (25.0f - ambientTempC) * 0.1f;
     }
 
-    if (bodyTemp < 32.0f)
-        return bodyTemp;
-    if (bodyTemp < 34.0f)
-        return bodyTemp + 3.0f;
-    if (bodyTemp < 35.5f)
-        return bodyTemp + 2.4f;
-    if (bodyTemp < 38.0f)
-        return bodyTemp + 1.4f;
-    return bodyTemp + 0.5f;
+    // Forehead/skin IR temperature reads below oral/core temperature, and the
+    // gap narrows as temperature rises (vasodilation brings more blood flow to
+    // the skin during fever). Map skin temp -> oral-equivalent body temp with a
+    // piecewise-linear calibration curve so the output stays continuous (no
+    // step jumps that would destabilise the downstream AI vitals model, which
+    // is trained on oral-equivalent values centered around 36.75 C).
+    struct CalPoint
+    {
+        float skin;
+        float oral;
+    };
+    static const CalPoint kCalCurve[] = {
+        {28.0f, 32.0f},
+        {32.0f, 35.3f},
+        {34.0f, 36.4f},
+        {35.5f, 37.0f},
+        {37.0f, 38.2f},
+        {39.0f, 39.8f},
+        {42.0f, 42.5f},
+    };
+    constexpr int kCalCount = sizeof(kCalCurve) / sizeof(kCalCurve[0]);
+
+    if (skinTempC <= kCalCurve[0].skin)
+    {
+        const float slope = (kCalCurve[1].oral - kCalCurve[0].oral) / (kCalCurve[1].skin - kCalCurve[0].skin);
+        return kCalCurve[0].oral + (skinTempC - kCalCurve[0].skin) * slope;
+    }
+    if (skinTempC >= kCalCurve[kCalCount - 1].skin)
+    {
+        const float slope = (kCalCurve[kCalCount - 1].oral - kCalCurve[kCalCount - 2].oral) /
+                             (kCalCurve[kCalCount - 1].skin - kCalCurve[kCalCount - 2].skin);
+        return kCalCurve[kCalCount - 1].oral + (skinTempC - kCalCurve[kCalCount - 1].skin) * slope;
+    }
+
+    for (int i = 0; i < kCalCount - 1; i++)
+    {
+        if (skinTempC >= kCalCurve[i].skin && skinTempC <= kCalCurve[i + 1].skin)
+        {
+            const float t = (skinTempC - kCalCurve[i].skin) / (kCalCurve[i + 1].skin - kCalCurve[i].skin);
+            return kCalCurve[i].oral + t * (kCalCurve[i + 1].oral - kCalCurve[i].oral);
+        }
+    }
+
+    return skinTempC; // unreachable
 }
 
 bool Mlx90614SensorModule::isValidSample(float objectTempC, float ambientTempC)
