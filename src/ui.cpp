@@ -1726,7 +1726,7 @@ void build_measureall()
     // ── HÀNG TRÊN: 3 ô chỉ số ──────────────────────────────────
     // Mỗi ô rộng 102px, cao 58px, gap 3px, bắt đầu y=30 (dưới header)
     const lv_coord_t TOP_Y = 30;
-    const lv_coord_t ROW_H = 58;
+    const lv_coord_t ROW_H = 76; // taller vitals cells (shrinks ECG status box below)
     const lv_coord_t CELL_W = 102;
     const lv_coord_t GAP = 3;
     const lv_coord_t LEFT_X = 4;
@@ -1761,7 +1761,7 @@ void build_measureall()
 
         *cells[i].out = lv_label_create(box);
         lv_label_set_text(*cells[i].out, "--");
-        lv_obj_set_style_text_font(*cells[i].out, &lv_font_montserrat_24, 0);
+        lv_obj_set_style_text_font(*cells[i].out, &lv_font_montserrat_28, 0);
         lv_obj_set_style_text_color(*cells[i].out, cells[i].color, 0);
     }
 
