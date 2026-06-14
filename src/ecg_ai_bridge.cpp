@@ -182,14 +182,17 @@ void EcgAiBridge::runPeakDetector(float s)
     if (refractoryCnt_ > 0)
         refractoryCnt_--;
 
-    const bool isLocalPeak = (peakPrev1_ > peakPrev2_) && (peakPrev1_ > s);
+    const float currEnergy = fabsf(s);
+    const float prev1Energy = fabsf(peakPrev1_);
+    const float prev2Energy = fabsf(peakPrev2_);
+    const bool isLocalPeak = (prev1Energy > prev2Energy) && (prev1Energy > currEnergy);
     if (isLocalPeak && refractoryCnt_ <= 0 && pendingPeakIdx_ < 0)
     {
         float threshold = AI_PEAK_THRESHOLD_RATIO * peakEnv_;
         if (threshold < AI_PEAK_MIN_THRESHOLD)
             threshold = AI_PEAK_MIN_THRESHOLD;
 
-        if (peakPrev1_ > threshold)
+        if (prev1Energy > threshold)
         {
             pendingPeakIdx_ = (rsmpHead_ - 2 + AI_RESAMP_BUF_SIZE) & (AI_RESAMP_BUF_SIZE - 1);
             pendingPostSamples_ = 0;

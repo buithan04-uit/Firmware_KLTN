@@ -1,4 +1,4 @@
-/*
+﻿/*
  * ===================================================================
  * AD8232 ECG SENSOR WITH ADS1115 ADC
  * ===================================================================
@@ -95,7 +95,7 @@
 // BIẾN TOÀN CỤC
 // ==========================================
 Adafruit_ADS1115 ads; // ADS1115 ADC
-static TwoWire adsI2C(1);
+static TwoWire &adsI2C = Wire1;
 
 // Bộ đệm bộ lọc
 float movingAvgBuffer[MOVING_AVG_SIZE];
@@ -584,7 +584,8 @@ void detectHeartRate()
     // OPT-3: Bỏ fabsf() — chỉ detect đỉnh DƯƠNG (sóng R thật sau HPF).
     // fabsf() biến sóng T và noise âm thành peak dương giả → đếm nhịp sai.
     // Sóng R sau HPF luôn dương khi điện cực đặt đúng (LA-RA hoặc single-lead).
-    float absCurr = hrInputSignal; // không dùng fabsf
+    // Use QRS energy so HR detection survives biphasic or inverted ECG.
+    float absCurr = fabsf(hrInputSignal);
 
     if (hrFirstValidMs == 0)
         hrFirstValidMs = now;
@@ -598,7 +599,7 @@ void detectHeartRate()
 
     // Detector dùng hrInputSignal có dấu để chỉ nhận R-peak dương.
     // Envelope vẫn dùng trị tuyệt đối để tự thích nghi biên độ nền.
-    float absCurrForEnv = fabsf(hrInputSignal);
+    float absCurrForEnv = absCurr;
     derivBaseline = derivBaseline * 0.996f + absCurrForEnv * 0.004f;
     hrEnvelope = hrEnvelope * 0.994f + absCurrForEnv * 0.006f;
 
@@ -740,6 +741,13 @@ float getECGFilteredSignal()
 int getHeartRate()
 {
     return heartRate;
+}
+
+bool consumeEcgBeatDetected()
+{
+    const bool detected = beatDetected;
+    beatDetected = false;
+    return detected;
 }
 
 bool areLeadsConnected()

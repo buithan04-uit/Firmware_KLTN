@@ -1386,6 +1386,7 @@ void build_ecg()
     lv_obj_set_style_line_color(chart_ecg, lv_color_hex(0x1a331a), LV_PART_MAIN);
     lv_chart_set_div_line_count(chart_ecg, 5, 14);
     ser_ecg = lv_chart_add_series(chart_ecg, lv_color_hex(0x00E676), LV_CHART_AXIS_PRIMARY_Y);
+    lv_chart_set_all_value(chart_ecg, ser_ecg, 100);
 
     ecg_lbl_warning = lv_label_create(scr);
     lv_label_set_text(ecg_lbl_warning, "");
@@ -1552,6 +1553,7 @@ void build_spo2()
     lv_obj_set_style_line_color(chart_ecg, lv_color_hex(0x1a3333), LV_PART_MAIN);
     lv_chart_set_div_line_count(chart_ecg, 3, 8);
     ser_ecg = lv_chart_add_series(chart_ecg, lv_color_hex(0x00E5FF), LV_CHART_AXIS_PRIMARY_Y);
+    lv_chart_set_all_value(chart_ecg, ser_ecg, 100);
 
     lbl_sensor_status = lv_label_create(wave_row);
     lv_label_set_text(lbl_sensor_status, "SENSOR STATUS");
@@ -1777,6 +1779,23 @@ void build_measureall()
     lock_scroll(ecg_box);
     lv_obj_set_size(ecg_box, ECG_W, ECG_H);
     lv_obj_set_pos(ecg_box, LEFT_X, ECG_Y);
+
+    chart_ecg_mini = lv_chart_create(ecg_box);
+    lv_obj_set_size(chart_ecg_mini, ECG_W - 6, ECG_H - 6);
+    lv_obj_align(chart_ecg_mini, LV_ALIGN_CENTER, 0, 0);
+    lv_chart_set_type(chart_ecg_mini, LV_CHART_TYPE_LINE);
+    lv_chart_set_point_count(chart_ecg_mini, 80);
+    lv_chart_set_range(chart_ecg_mini, LV_CHART_AXIS_PRIMARY_Y, 0, 200);
+    lv_chart_set_update_mode(chart_ecg_mini, LV_CHART_UPDATE_MODE_CIRCULAR);
+    lv_obj_set_style_bg_opa(chart_ecg_mini, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(chart_ecg_mini, 0, 0);
+    lv_obj_set_style_pad_all(chart_ecg_mini, 0, 0);
+    lv_obj_set_style_size(chart_ecg_mini, 0, LV_PART_INDICATOR);
+    lv_obj_set_style_line_width(chart_ecg_mini, 1, LV_PART_ITEMS);
+    lv_obj_set_style_line_color(chart_ecg_mini, lv_color_hex(0x12302A), LV_PART_MAIN);
+    lv_chart_set_div_line_count(chart_ecg_mini, 4, 8);
+    ser_ecg_mini = lv_chart_add_series(chart_ecg_mini, lv_color_hex(0x00E676), LV_CHART_AXIS_PRIMARY_Y);
+    lv_chart_set_all_value(chart_ecg_mini, ser_ecg_mini, 100);
 
     lv_obj_t *ecg_label = lv_label_create(ecg_box);
     lv_label_set_text(ecg_label, "ECG DATA");
