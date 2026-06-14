@@ -25,6 +25,11 @@ void EcgAiBridge::reset()
     notchX1_ = notchX2_ = notchY1_ = notchY2_ = 0.0f;
     lpfPrev_ = 0.0f;
 
+    // Seed adaptive gain estimate so behaviour matches the old fixed
+    // ECG_ANALOG_GAIN_ESTIMATE=100 constant until the EMA converges.
+    const float seedStd = AI_GAIN_SEED_ESTIMATE * MITBIH_STD;
+    varEstimate_ = seedStd * seedStd;
+
     // Raw buffer
     for (int i = 0; i < AI_RAW_BUF_SIZE; i++)
         rawBuf_[i] = 0.0f;
@@ -217,31 +222,21 @@ bool EcgAiBridge::extractWindow(int peakIdx)
     // Tính index bắt đầu (start = peakIdx - AI_HALF_WIN)
     int startIdx = (peakIdx - AI_HALF_WIN + AI_RESAMP_BUF_SIZE) & (AI_RESAMP_BUF_SIZE - 1);
 
+    // Suy ra gain hiện tại từ EMA phương sai: gain = std_device / MITBIH_STD
+    // rồi chia ngược lại để đưa biên độ về thang "body mV" giống MIT-BIH.
+    // Gain được EMA chậm (~8s) nên ổn định qua nhiều nhịp, không xoá mất
+    // sự khác biệt biên độ giữa các nhịp trong cùng 1 window.
+    float gain = sqrtf(varEstimate_) / MITBIH_STD;
+    gain = constrain(gain, AI_GAIN_MIN, AI_GAIN_MAX);
+
     // Extract AI_WINDOW mẫu liên tiếp, normalize từng mẫu
     for (int i = 0; i < AI_WINDOW; i++)
     {
         int idx = (startIdx + i) & (AI_RESAMP_BUF_SIZE - 1);
         float mv = rsmpBuf_[idx];
 
-        // Normalize theo MIT-BIH: z = (x - MEAN) / STD
-        // Tín hiệu của bạn sau HPF đã là AC (zero-mean), còn MIT-BIH MEAN≈-0.288
-        // Tuy nhiên ta vẫn dùng đúng MEAN/STD từ training để đảm bảo match
-        //
-        // Lưu ý quan trọng về đơn vị:
-        // MIT-BIH: tín hiệu lưu ở đơn vị mV (thực), sau convert từ ADC counts
-        // Thiết bị của bạn: filteredSignal sau HPF cũng ở mV (AC)
-        // → Đơn vị khớp nhau, chỉ cần shift/scale bằng MEAN/STD
-        //
-        // MIT-BIH MEAN ≈ -0.288 mV: DC offset nhỏ từ baseline của dataset
-        // MIT-BIH STD ≈ 0.524 mV: biên độ RMS điển hình của QRS trong dataset
-        // Tín hiệu của bạn sau HPF: biên độ QRS điển hình ~50-300 mV
-        //
-        // *** CRITICAL: Biên độ tín hiệu của bạn lớn hơn MIT-BIH ~100-600x ***
-        // Lý do: AD8232 có gain ~100 bên trong, ADS1115 đo điện áp output (mV),
-        // còn MIT-BIH lưu tín hiệu ECG thực ở body surface (~0.1-1 mV).
-        //
-        // FIX: Chia thêm cho hệ số gain AD8232 (~100) trước khi normalize:
-        float mv_body = mv / ECG_ANALOG_GAIN_ESTIMATE;
+        // z = (x/gain - MEAN) / STD — xem giải thích AI_GAIN_* trong header
+        float mv_body = mv / gain;
         window_[i] = (mv_body - MITBIH_MEAN) / MITBIH_STD;
 
         // Clamp để tránh outlier làm mô hình mất ổn định
@@ -264,6 +259,9 @@ void EcgAiBridge::pushSample(float rawMv)
     float hpf = applyHPF(rawMv) * ECG_AI_POLARITY;
     float notch = applyNotch(hpf);
     float filtered = applyLPF(notch);
+
+    // Cập nhật ước lượng phương sai (EMA chậm) để suy ra gain hiện tại
+    varEstimate_ = AI_GAIN_EMA_ALPHA * (filtered * filtered) + (1.0f - AI_GAIN_EMA_ALPHA) * varEstimate_;
 
     // Lưu vào raw buffer 250Hz
     rawBuf_[rawHead_] = filtered;

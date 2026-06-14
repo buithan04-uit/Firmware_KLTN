@@ -46,8 +46,22 @@
 // Lưu ý: MIT-BIH lưu tín hiệu ở đơn vị mV (thực), không phải ADC count
 static constexpr float MITBIH_MEAN = -0.28766632f;
 static constexpr float MITBIH_STD  =  0.52417608f;
-static constexpr float ECG_ANALOG_GAIN_ESTIMATE = 100.0f; // AD8232/module output gain estimate before MIT-BIH normalization
 static constexpr float ECG_AI_POLARITY = 1.0f; // set to -1.0f if the hardware lead orientation inverts R-peaks
+
+// ==========================================
+// ADAPTIVE GAIN (tự calibrate biên độ thiết bị về thang MIT-BIH)
+// ==========================================
+// Biên độ tín hiệu AC sau HPF/Notch/LPF phụ thuộc gain analog của board
+// (AD8232 + ADS1115), vốn không biết chính xác và có thể lệch MIT-BIH
+// 100-600x tuỳ phần cứng/điện cực. Thay vì dùng 1 hằng số đoán trước,
+// ta theo dõi phương sai (EMA) của tín hiệu AC liên tục và suy ra hệ số
+// gain hiện tại = std_device / MITBIH_STD, rồi chia ngược lại trước khi
+// normalize. EMA chạy chậm (~vài giây) để không xoá mất sự khác biệt
+// biên độ giữa các nhịp (đặc trưng quan trọng để phân loại V/PVC).
+static constexpr float AI_GAIN_EMA_ALPHA = 0.0005f; // ~8s time constant @ 250Hz
+static constexpr float AI_GAIN_SEED_ESTIMATE = 100.0f; // gain giả định ban đầu trước khi EMA hội tụ
+static constexpr float AI_GAIN_MIN = 10.0f;   // chặn dưới, tránh chia gần 0 khi tín hiệu yếu/mất điện cực
+static constexpr float AI_GAIN_MAX = 1000.0f; // chặn trên, tránh khuếch đại nhiễu nền thành "tín hiệu"
 
 // ==========================================
 // CẤU HÌNH RESAMPLE
@@ -140,6 +154,9 @@ private:
     float hpfPrevOut_;
     float notchX1_, notchX2_, notchY1_, notchY2_;
     float lpfPrev_;
+
+    // --- Adaptive gain estimate (EMA of filtered signal variance) ---
+    float varEstimate_;
 
     // --- Raw buffer @250Hz (ring buffer) ---
     float rawBuf_[AI_RAW_BUF_SIZE];
