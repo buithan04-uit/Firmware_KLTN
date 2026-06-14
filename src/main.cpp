@@ -41,6 +41,8 @@ static constexpr uint32_t MQTT_OK_LOG_INTERVAL_MS = 1500;
 static constexpr uint8_t MQTT_MAX_CONNECT_FAILS = 3;
 static constexpr uint8_t TP5100_CHRG_PIN = 34; // TLP521-2 output CHRG, active LOW
 static constexpr uint8_t TP5100_FULL_PIN = 35; // TLP521-2 output STDBY/FULL, active LOW
+static constexpr uint8_t ECG_DEBUG_LED_PIN = 2;
+static constexpr uint16_t ECG_DEBUG_LED_PULSE_MS = 70;
 static constexpr size_t MQTT_PAYLOAD_BUFFER = 3072;
 static constexpr uint16_t ECG_FRAME_RAW_CAP = 160;
 static constexpr uint8_t ECG_FRAME_POINTS = 64;
@@ -177,6 +179,7 @@ static int16_t ecgMvToCentimv(float mv)
 }
 
 static uint8_t latestEcgLcdY = 100;
+static volatile uint32_t ecgDebugLedOffAt = 0;
 static portMUX_TYPE ecgLcdQueueMux = portMUX_INITIALIZER_UNLOCKED;
 static uint8_t ecgLcdQueue[ECG_LCD_QUEUE_CAP];
 static uint16_t ecgLcdQueueHead = 0;
@@ -224,6 +227,21 @@ static uint8_t mapEcgMvToLcdY(float ecgMv, bool leadsConnected)
     const float targetY = constrain(100.0f + normalized * 78.0f, 12.0f, 188.0f);
     displayY = 0.35f * targetY + 0.65f * displayY;
     return static_cast<uint8_t>(constrain(static_cast<int>(displayY + 0.5f), 0, 200));
+}
+
+static void ecgDebugLedPulse()
+{
+    digitalWrite(ECG_DEBUG_LED_PIN, HIGH);
+    ecgDebugLedOffAt = millis() + ECG_DEBUG_LED_PULSE_MS;
+}
+
+static void ecgDebugLedUpdate()
+{
+    if (ecgDebugLedOffAt != 0 && static_cast<int32_t>(millis() - ecgDebugLedOffAt) >= 0)
+    {
+        digitalWrite(ECG_DEBUG_LED_PIN, LOW);
+        ecgDebugLedOffAt = 0;
+    }
 }
 
 static void ecgLcdQueueReset()
@@ -1890,10 +1908,12 @@ static void measure_all_prepare()
 void ecgSamplingTask(void *pvParameters)
 {
     TickType_t lastWake = xTaskGetTickCount();
+    bool wasEcgLive = false;
 
     while (1)
     {
         const bool ecgActive = in_menu && is_ecg_sampling_screen(current_screen_type);
+        ecgDebugLedUpdate();
 
         // Keep ECG sampling at 250Hz only when ECG screen is active.
         // This prevents ADS1115/I2C retries from degrading menu/dashboard responsiveness.
@@ -1903,21 +1923,37 @@ void ecgSamplingTask(void *pvParameters)
             const SensorSnapshot ecgSnap = sensorRuntime.ecgSnapshot();
             if (sensorRuntime.ad8232Ready() && ecgSnap.sensorReady && ecgSnap.signalReady)
             {
+                if (!wasEcgLive)
+                {
+                    latestEcgLcdY = mapEcgMvToLcdY(0.0f, false);
+                    ecgLcdQueueReset();
+                    wasEcgLive = true;
+                }
                 const float filteredMv = getECGFilteredSignal();
                 latestEcgLcdY = mapEcgMvToLcdY(filteredMv, true);
                 ecgLcdQueuePush(latestEcgLcdY);
                 ecgFramePush(filteredMv, latestEcgLcdY);
+                if (consumeEcgBeatDetected())
+                {
+                    ecgDebugLedPulse();
+                }
             }
             else
             {
+                wasEcgLive = false;
                 latestEcgLcdY = mapEcgMvToLcdY(0.0f, false);
                 ecgLcdQueueReset();
+                digitalWrite(ECG_DEBUG_LED_PIN, LOW);
+                ecgDebugLedOffAt = 0;
             }
         }
         else
         {
+            wasEcgLive = false;
             latestEcgLcdY = mapEcgMvToLcdY(0.0f, false);
             ecgLcdQueueReset();
+            digitalWrite(ECG_DEBUG_LED_PIN, LOW);
+            ecgDebugLedOffAt = 0;
         }
 
         const TickType_t periodTicks = pdMS_TO_TICKS(ecgActive ? ECG_SAMPLE_UPDATE_MS : ECG_IDLE_SAMPLE_MS);
@@ -2643,6 +2679,7 @@ void guiTask(void *pvParameters)
                                                  lastEcgFramePublishN,
                                                  frameP2pMv,
                                                  lastEcgFrameClipPct);
+                ui_update_measure_all_ecg_waveform(ecgChart, ecgLive);
 
                 if (millis() - lastMeasureAllEcgLog >= ECG_DEBUG_JSON_INTERVAL_MS)
                 {
@@ -2850,6 +2887,8 @@ void setup()
 
     pinMode(TP5100_CHRG_PIN, INPUT);
     pinMode(TP5100_FULL_PIN, INPUT);
+    pinMode(ECG_DEBUG_LED_PIN, OUTPUT);
+    digitalWrite(ECG_DEBUG_LED_PIN, LOW);
 
     Serial.printf("[BOOT] reset_reason=%d\n", esp_reset_reason());
     Serial.printf("[BOOT] chip_rev=%d\n", ESP.getChipRevision());

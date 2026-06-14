@@ -53,6 +53,8 @@ float getECGFilteredSignal();
  */
 int getHeartRate();
 
+bool consumeEcgBeatDetected();
+
 /**
  * Kiểm tra trạng thái kết nối điện cực
  * @return true nếu điện cực được gắn đúng, false nếu bị tuột
