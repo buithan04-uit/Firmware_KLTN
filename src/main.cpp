@@ -2708,7 +2708,6 @@ void guiTask(void *pvParameters)
                                                  lastEcgFramePublishN,
                                                  frameP2pMv,
                                                  lastEcgFrameClipPct);
-                ui_update_measureall_ecg(ecgVal, ecgLive);
                 (void)ecgChart;
 
                 if (millis() - lastMeasureAllEcgLog >= ECG_DEBUG_JSON_INTERVAL_MS)

@@ -78,8 +78,6 @@ static lv_obj_t *lbl_all_ecg_state = NULL;
 static lv_obj_t *lbl_all_ecg_quality = NULL;
 static lv_obj_t *lbl_all_ecg_amp = NULL;
 static lv_obj_t *all_ecg_beat_dot = NULL;
-static lv_obj_t *chart_ecg_mini = NULL;
-static lv_chart_series_t *ser_ecg_mini = NULL;
 
 static bool g_collect_take_requested = false;
 static bool g_collect_id_minus_requested = false;
@@ -876,8 +874,6 @@ void clean_resources()
     ecg_beat_dot = NULL;
     chart_ecg = NULL;
     ser_ecg = NULL;
-    chart_ecg_mini = NULL;
-    ser_ecg_mini = NULL;
     lbl_all_hr = NULL;
     lbl_all_spo2 = NULL;
     lbl_all_temp = NULL;
@@ -1765,88 +1761,79 @@ void build_measureall()
         lv_obj_set_style_text_color(*cells[i].out, cells[i].color, 0);
     }
 
-    // ── Ô DƯỚI: ECG waveform to ────────────────────────────────
-    // y = TOP_Y + ROW_H + GAP, cao = 240 - header(28) - ROW_H - GAP - footer(18) - gap*2
-    const lv_coord_t ECG_Y = TOP_Y + ROW_H + GAP;
-    const lv_coord_t ECG_W = 312;
-    const lv_coord_t ECG_H = 240 - 28 - ROW_H - GAP * 2 - 18; // ~113px
+    // ── LƯỚI TRẠNG THÁI 2x2: ECG / truyền MQTT / tín hiệu / khoảng cách ──
+    // ECG chỉ gửi lên web (web hiển thị sóng), LCD chỉ cần hiển thị trạng
+    // thái nên thay chart bằng 4 ô trạng thái nhỏ, gọn và rõ hơn.
+    const lv_coord_t PANEL_Y = TOP_Y + ROW_H + GAP;
+    const lv_coord_t PANEL_W = 312;
+    const lv_coord_t PANEL_H = 240 - 28 - ROW_H - GAP * 2 - 18; // ~112px
+    const lv_coord_t CARD_W = (PANEL_W - GAP) / 2;
+    const lv_coord_t CARD_H = (PANEL_H - GAP) / 2;
 
-    lv_obj_t *ecg_box = lv_obj_create(scr);
-    lv_obj_add_style(ecg_box, &style_panel, 0);
-    lv_obj_set_style_shadow_width(ecg_box, 0, 0);
-    lv_obj_set_style_pad_all(ecg_box, 3, 0);
-    lv_obj_set_style_bg_color(ecg_box, lv_color_hex(0x050505), 0);
-    lock_scroll(ecg_box);
-    lv_obj_set_size(ecg_box, ECG_W, ECG_H);
-    lv_obj_set_pos(ecg_box, LEFT_X, ECG_Y);
+    struct
+    {
+        const char *title;
+        const char *initial;
+        uint32_t color;
+        lv_obj_t **out;
+        bool withDot;
+    } statusCards[4] = {
+        {"ECG", "ECG WAIT", 0xFFB300, &lbl_all_ecg_state, true},
+        {"TRUYEN MQTT", "MQTT OFF", 0xAAAAAA, &lbl_all_ecg_quality, false},
+        {"TIN HIEU", "WAITING SIGNAL", 0x888888, &lbl_all_ecg_amp, false},
+        {"KHOANG CACH", "-- mm", 0x00E5FF, &lbl_all_dist, false},
+    };
 
-    chart_ecg_mini = lv_chart_create(ecg_box);
-    lv_obj_set_size(chart_ecg_mini, ECG_W - 6, ECG_H - 6);
-    lv_obj_align(chart_ecg_mini, LV_ALIGN_CENTER, 0, 0);
-    lv_chart_set_type(chart_ecg_mini, LV_CHART_TYPE_LINE);
-    lv_chart_set_point_count(chart_ecg_mini, 80);
-    lv_chart_set_range(chart_ecg_mini, LV_CHART_AXIS_PRIMARY_Y, 0, 200);
-    lv_chart_set_update_mode(chart_ecg_mini, LV_CHART_UPDATE_MODE_CIRCULAR);
-    lv_obj_set_style_bg_opa(chart_ecg_mini, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(chart_ecg_mini, 0, 0);
-    lv_obj_set_style_pad_all(chart_ecg_mini, 0, 0);
-    lv_obj_set_style_size(chart_ecg_mini, 0, LV_PART_INDICATOR);
-    lv_obj_set_style_line_width(chart_ecg_mini, 1, LV_PART_ITEMS);
-    lv_obj_set_style_line_color(chart_ecg_mini, lv_color_hex(0x12302A), LV_PART_MAIN);
-    lv_chart_set_div_line_count(chart_ecg_mini, 4, 8);
-    ser_ecg_mini = lv_chart_add_series(chart_ecg_mini, lv_color_hex(0x00E676), LV_CHART_AXIS_PRIMARY_Y);
-    lv_chart_set_all_value(chart_ecg_mini, ser_ecg_mini, 100);
+    for (int i = 0; i < 4; i++)
+    {
+        const int col = i % 2;
+        const int row = i / 2;
 
-    // Labels float in the corners so they don't cover the live waveform
-    // that now fills the whole box.
-    lv_obj_t *ecg_label = lv_label_create(ecg_box);
-    lv_label_set_text(ecg_label, "ECG");
-    lv_obj_set_style_text_color(ecg_label, lv_color_hex(0x4D7A6E), 0);
-    lv_obj_set_style_text_font(ecg_label, &lv_font_montserrat_10, 0);
-    lv_obj_align(ecg_label, LV_ALIGN_TOP_LEFT, 4, 1);
+        lv_obj_t *card = lv_obj_create(scr);
+        lv_obj_add_style(card, &style_panel, 0);
+        lv_obj_set_style_shadow_width(card, 0, 0);
+        lv_obj_set_style_pad_all(card, 4, 0);
+        lock_scroll(card);
+        lv_obj_set_size(card, CARD_W, CARD_H);
+        lv_obj_set_pos(card, LEFT_X + col * (CARD_W + GAP), PANEL_Y + row * (CARD_H + GAP));
+        lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_flex_align(card, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-    all_ecg_beat_dot = lv_obj_create(ecg_box);
-    lv_obj_set_size(all_ecg_beat_dot, 10, 10);
-    lv_obj_set_style_radius(all_ecg_beat_dot, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_color(all_ecg_beat_dot, lv_color_hex(0x113322), 0);
-    lv_obj_set_style_border_width(all_ecg_beat_dot, 0, 0);
-    lv_obj_align(all_ecg_beat_dot, LV_ALIGN_TOP_RIGHT, -4, 4);
+        lv_obj_t *lbl_title = lv_label_create(card);
+        lv_label_set_text(lbl_title, statusCards[i].title);
+        lv_obj_set_style_text_color(lbl_title, lv_color_hex(0x666666), 0);
+        lv_obj_set_style_text_font(lbl_title, &lv_font_montserrat_10, 0);
 
-    lbl_all_ecg_state = lv_label_create(ecg_box);
-    lv_label_set_text(lbl_all_ecg_state, "ECG WAIT");
-    lv_obj_set_style_text_font(lbl_all_ecg_state, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(lbl_all_ecg_state, lv_color_hex(0xFFB300), 0);
-    lv_obj_align(lbl_all_ecg_state, LV_ALIGN_TOP_RIGHT, -16, 2);
+        *statusCards[i].out = lv_label_create(card);
+        lv_label_set_text(*statusCards[i].out, statusCards[i].initial);
+        lv_obj_set_width(*statusCards[i].out, CARD_W - 12);
+        lv_label_set_long_mode(*statusCards[i].out, LV_LABEL_LONG_DOT);
+        lv_obj_set_style_text_align(*statusCards[i].out, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_font(*statusCards[i].out, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(*statusCards[i].out, lv_color_hex(statusCards[i].color), 0);
 
-    lbl_all_ecg_quality = lv_label_create(ecg_box);
-    lv_label_set_text(lbl_all_ecg_quality, "MQTT OFF");
-    lv_obj_set_style_text_font(lbl_all_ecg_quality, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(lbl_all_ecg_quality, lv_color_hex(0xAAAAAA), 0);
-    lv_obj_align(lbl_all_ecg_quality, LV_ALIGN_BOTTOM_LEFT, 4, -2);
+        if (statusCards[i].withDot)
+        {
+            all_ecg_beat_dot = lv_obj_create(card);
+            lv_obj_set_size(all_ecg_beat_dot, 8, 8);
+            lv_obj_set_style_radius(all_ecg_beat_dot, LV_RADIUS_CIRCLE, 0);
+            lv_obj_set_style_bg_color(all_ecg_beat_dot, lv_color_hex(0x113322), 0);
+            lv_obj_set_style_border_width(all_ecg_beat_dot, 0, 0);
+            lv_obj_align(all_ecg_beat_dot, LV_ALIGN_TOP_RIGHT, -2, 2);
+        }
+    }
 
-    lbl_all_ecg_amp = lv_label_create(ecg_box);
-    lv_label_set_text(lbl_all_ecg_amp, "FRAME READY");
-    lv_obj_set_style_text_font(lbl_all_ecg_amp, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(lbl_all_ecg_amp, lv_color_hex(0x888888), 0);
-    lv_obj_align(lbl_all_ecg_amp, LV_ALIGN_BOTTOM_RIGHT, -4, -2);
-
-    // ── FOOTER: dist (trái) + status (phải) ────────────────────
-    const lv_coord_t FOOTER_Y = ECG_Y + ECG_H + GAP;
-
-    lbl_all_dist = lv_label_create(scr);
-    lv_label_set_text(lbl_all_dist, "DIST: -- mm");
-    lv_obj_set_style_text_font(lbl_all_dist, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(lbl_all_dist, lv_color_hex(0x888888), 0);
-    lv_obj_set_pos(lbl_all_dist, LEFT_X + 2, FOOTER_Y);
+    // ── FOOTER: trạng thái đo / gửi ─────────────────────────────
+    const lv_coord_t FOOTER_Y = PANEL_Y + PANEL_H + GAP;
 
     lbl_all_status = lv_label_create(scr);
     lv_label_set_text(lbl_all_status, "ENTER: MEASURE & SEND");
-    lv_obj_set_width(lbl_all_status, 200);
+    lv_obj_set_width(lbl_all_status, 312);
     lv_label_set_long_mode(lbl_all_status, LV_LABEL_LONG_DOT);
-    lv_obj_set_style_text_align(lbl_all_status, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_set_style_text_align(lbl_all_status, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_font(lbl_all_status, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(lbl_all_status, lv_color_hex(0xAAAAAA), 0);
-    lv_obj_set_pos(lbl_all_status, 116, FOOTER_Y);
+    lv_obj_set_pos(lbl_all_status, LEFT_X, FOOTER_Y);
 
     // dummy button để bắt key
     lv_obj_t *dummy = lv_btn_create(scr);
@@ -3052,14 +3039,14 @@ void ui_set_measure_all_values(float temp, int hr, int spo2, float ecg, float di
 
     if (lbl_all_dist)
     {
-        char buf[24];
+        char buf[16];
         if (dist >= 999.0f)
         {
-            snprintf(buf, sizeof(buf), "DIST: -- mm");
+            snprintf(buf, sizeof(buf), "-- mm");
         }
         else
         {
-            snprintf(buf, sizeof(buf), "DIST: %.0f mm", dist);
+            snprintf(buf, sizeof(buf), "%.0f mm", dist);
         }
         lv_label_set_text(lbl_all_dist, buf);
     }
@@ -3142,196 +3129,6 @@ void ui_update_measure_all_ecg_status(bool leadsOn,
         lv_obj_set_style_bg_color(all_ecg_beat_dot,
                                   leadsOn ? lv_color_hex(0x00E676) : lv_color_hex(0x331111),
                                   0);
-    }
-}
-
-void ui_update_measure_all_ecg_waveform(int waveformY200, bool leadsOn)
-{
-    if (current_screen_type != SCR_MEASUREALL || !chart_ecg_mini || !ser_ecg_mini)
-    {
-        return;
-    }
-
-    static uint8_t clipCount = 0;
-    static uint8_t frameCount = 0;
-    static uint8_t weakCount = 0;
-    static uint8_t lastY = 100;
-    static uint16_t motionSum = 0;
-    static unsigned long beatFlashUntil = 0;
-    static unsigned long lastStatusUpdate = 0;
-
-    if (!leadsOn)
-    {
-        clipCount = 0;
-        frameCount = 0;
-        weakCount = 0;
-        motionSum = 0;
-        lastY = 100;
-
-        lv_chart_set_next_value(chart_ecg_mini, ser_ecg_mini, 100);
-        if (lbl_all_ecg_state)
-        {
-            lv_label_set_text(lbl_all_ecg_state, "ECG LEADS OFF");
-            lv_obj_set_style_text_color(lbl_all_ecg_state, lv_color_hex(0xFF5252), 0);
-        }
-        if (lbl_all_ecg_quality)
-        {
-            lv_label_set_text(lbl_all_ecg_quality, "Q: --");
-            lv_obj_set_style_text_color(lbl_all_ecg_quality, lv_color_hex(0x888888), 0);
-        }
-        if (lbl_all_ecg_amp)
-        {
-            lv_label_set_text(lbl_all_ecg_amp, "AMP --");
-        }
-        if (all_ecg_beat_dot)
-        {
-            lv_obj_set_style_bg_color(all_ecg_beat_dot, lv_color_hex(0x331111), 0);
-        }
-        return;
-    }
-
-    const uint8_t y = static_cast<uint8_t>(constrain(waveformY200, 0, 200));
-    lv_chart_set_next_value(chart_ecg_mini, ser_ecg_mini, y);
-
-    const uint8_t centered = (y > 100) ? (y - 100) : (100 - y);
-    const uint8_t delta = (y > lastY) ? (y - lastY) : (lastY - y);
-    lastY = y;
-    motionSum += delta;
-    frameCount++;
-    if (y <= 5 || y >= 195)
-    {
-        clipCount++;
-    }
-    if (centered < 4)
-    {
-        weakCount++;
-    }
-    if (centered > 42 || delta > 34)
-    {
-        beatFlashUntil = millis() + 90;
-    }
-
-    if (all_ecg_beat_dot)
-    {
-        lv_obj_set_style_bg_color(all_ecg_beat_dot,
-                                  (millis() < beatFlashUntil) ? lv_color_hex(0x00E676) : lv_color_hex(0x113322), 0);
-    }
-
-    if (millis() - lastStatusUpdate < 250)
-    {
-        return;
-    }
-    lastStatusUpdate = millis();
-
-    const uint8_t clipPct = frameCount > 0 ? (clipCount * 100 / frameCount) : 0;
-    const uint8_t weakPct = frameCount > 0 ? (weakCount * 100 / frameCount) : 0;
-    const uint8_t avgMotion = frameCount > 0 ? (motionSum / frameCount) : 0;
-    const char *quality = "OK";
-    uint32_t qualityColor = 0x00E676;
-
-    if (clipPct > 30)
-    {
-        quality = "CLIP";
-        qualityColor = 0xFF5252;
-    }
-    else if (weakPct > 75 || avgMotion < 2)
-    {
-        quality = "WEAK";
-        qualityColor = 0xFFB300;
-    }
-    else if (clipPct > 12 || avgMotion > 45)
-    {
-        quality = "NOISY";
-        qualityColor = 0xFFB300;
-    }
-
-    if (lbl_all_ecg_state)
-    {
-        lv_label_set_text(lbl_all_ecg_state, "ECG LIVE");
-        lv_obj_set_style_text_color(lbl_all_ecg_state, lv_color_hex(0x00E676), 0);
-    }
-    if (lbl_all_ecg_quality)
-    {
-        lv_label_set_text_fmt(lbl_all_ecg_quality, "Q: %s", quality);
-        lv_obj_set_style_text_color(lbl_all_ecg_quality, lv_color_hex(qualityColor), 0);
-    }
-    if (lbl_all_ecg_amp)
-    {
-        lv_label_set_text_fmt(lbl_all_ecg_amp, "AMP %u/100", static_cast<unsigned>(centered));
-    }
-
-    clipCount = 0;
-    frameCount = 0;
-    weakCount = 0;
-    motionSum = 0;
-}
-
-// Draws the live ECG waveform into chart_ecg_mini with an auto-scaling
-// baseline/gain so beats stay visible regardless of signal amplitude.
-// Status labels (state/quality/amp/beat dot) are owned exclusively by
-// ui_update_measure_all_ecg_status() to avoid two functions fighting over
-// the same text fields.
-void ui_update_measureall_ecg(float ecg_mv, bool leads_connected)
-{
-    if (current_screen_type != SCR_MEASUREALL || !chart_ecg_mini || !ser_ecg_mini)
-    {
-        return;
-    }
-
-    static unsigned long lastUpdate = 0;
-    static float displayBaseline = 0.0f;
-    static float displayFiltered = 0.0f;
-    static float envelope = 110.0f;
-    static float yScale = 190.0f;
-    static bool needsReprime = true;
-
-    if (!leads_connected)
-    {
-        needsReprime = true;
-        lv_chart_set_next_value(chart_ecg_mini, ser_ecg_mini, 100);
-        return;
-    }
-
-    if (needsReprime)
-    {
-        displayBaseline = ecg_mv;
-        displayFiltered = 0.0f;
-        envelope = 110.0f;
-        yScale = 190.0f;
-        lastUpdate = millis();
-        needsReprime = false;
-    }
-
-    if (millis() - lastUpdate >= 8)
-    {
-        lastUpdate = millis();
-
-        float baselineInput = constrain(ecg_mv, -90.0f, 90.0f);
-        displayBaseline = 0.992f * displayBaseline + 0.008f * baselineInput;
-        float centered = ecg_mv - displayBaseline;
-
-        float delta = fabsf(centered - displayFiltered);
-        float smoothAlpha = (delta > 40.0f) ? 0.28f : 0.58f;
-        displayFiltered = smoothAlpha * displayFiltered + (1.0f - smoothAlpha) * centered;
-
-        float absDisplay = fabsf(displayFiltered);
-        if (absDisplay > envelope)
-            envelope = 0.20f * absDisplay + 0.80f * envelope;
-        else
-            envelope = 0.005f * absDisplay + 0.995f * envelope;
-        envelope = constrain(envelope, 70.0f, 300.0f);
-
-        float targetScale = envelope * 1.70f;
-        if (targetScale < 170.0f)
-            targetScale = 170.0f;
-        yScale = 0.97f * yScale + 0.03f * targetScale;
-        yScale = constrain(yScale, 160.0f, 380.0f);
-
-        float limited = constrain(displayFiltered, -0.95f * yScale, 0.95f * yScale);
-        int ecgChart = (int)((limited / yScale + 1.0f) * 100.0f);
-        ecgChart = constrain(ecgChart, 0, 200);
-
-        lv_chart_set_next_value(chart_ecg_mini, ser_ecg_mini, ecgChart);
     }
 }
 

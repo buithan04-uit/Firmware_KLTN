@@ -57,9 +57,7 @@ void ui_update_measure_all_ecg_status(bool leadsOn,
                                       uint8_t framePoints,
                                       float frameP2pMv,
                                       uint8_t frameClipPct);
-void ui_update_measure_all_ecg_waveform(int waveformY200, bool leadsOn);
 void ui_set_measure_all_send_state(uint8_t state);
-void ui_update_measureall_ecg(float ecg_mv, bool leads_connected);
 void ui_set_battery(uint8_t percent, bool charging, bool full = false);
 
 // 0=IDLE  1=SENDING  2=OK  3=FAIL  4=NO_WIFI
