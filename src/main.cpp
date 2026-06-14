@@ -42,7 +42,7 @@ static constexpr uint8_t MQTT_MAX_CONNECT_FAILS = 3;
 static constexpr uint8_t TP5100_CHRG_PIN = 34; // TLP521-2 output CHRG, active LOW
 static constexpr uint8_t TP5100_FULL_PIN = 35; // TLP521-2 output STDBY/FULL, active LOW
 static constexpr uint8_t ECG_DEBUG_LED_PIN = 2;
-static constexpr uint16_t ECG_DEBUG_LED_PULSE_MS = 70;
+static constexpr uint16_t ECG_DEBUG_LED_PULSE_MS = 120;
 static constexpr size_t MQTT_PAYLOAD_BUFFER = 3072;
 static constexpr uint16_t ECG_FRAME_RAW_CAP = 160;
 static constexpr uint8_t ECG_FRAME_POINTS = 64;
@@ -229,9 +229,14 @@ static uint8_t mapEcgMvToLcdY(float ecgMv, bool leadsConnected)
     return static_cast<uint8_t>(constrain(static_cast<int>(displayY + 0.5f), 0, 200));
 }
 
+static void ecgDebugLedWrite(bool on)
+{
+    digitalWrite(ECG_DEBUG_LED_PIN, on ? HIGH : LOW);
+}
+
 static void ecgDebugLedPulse()
 {
-    digitalWrite(ECG_DEBUG_LED_PIN, HIGH);
+    ecgDebugLedWrite(true);
     ecgDebugLedOffAt = millis() + ECG_DEBUG_LED_PULSE_MS;
 }
 
@@ -239,7 +244,7 @@ static void ecgDebugLedUpdate()
 {
     if (ecgDebugLedOffAt != 0 && static_cast<int32_t>(millis() - ecgDebugLedOffAt) >= 0)
     {
-        digitalWrite(ECG_DEBUG_LED_PIN, LOW);
+        ecgDebugLedWrite(false);
         ecgDebugLedOffAt = 0;
     }
 }
@@ -512,6 +517,14 @@ static bool publishAiTrainingWindow(const float *window, int len)
     if (!mqttSendEnabled || !mqttClient.connected())
         return false;
 
+    float winMin = len > 0 ? window[0] : 0.0f;
+    float winMax = winMin;
+    for (int i = 1; i < len; i++)
+    {
+        if (window[i] < winMin) winMin = window[i];
+        if (window[i] > winMax) winMax = window[i];
+    }
+
     static char payload[MQTT_PAYLOAD_BUFFER];
     int pos = 0;
     pos += snprintf(payload + pos, sizeof(payload) - pos,
@@ -546,10 +559,15 @@ static bool publishAiTrainingWindow(const float *window, int len)
     if (millis() - lastLog >= 2000)
     {
         lastLog = millis();
-        Serial.printf("[AI] Training window beat=%lu publish %s topic=%s len=%d\n",
+        Serial.printf("[AI] Window beat=%lu publish %s topic=%s n=%d fs=%.0f r=%d normalized=1 min=%.3f max=%.3f len=%d\n",
                       static_cast<unsigned long>(ecgAiBridge.beatCount()),
                       ok ? "OK" : "FAIL",
                       mqttPublishTopic.c_str(),
+                      len,
+                      AI_INPUT_FS,
+                      AI_HALF_WIN,
+                      winMin,
+                      winMax,
                       pos);
     }
     return ok;
@@ -1002,13 +1020,9 @@ static void publishTelemetryIfReady(const WifiConfigManager &wifi, const LcdSens
         break;
 
     case SCR_ECG:
-        modeName = "ecg";
-        if (latestEcgLive)
-        {
-            doc["ecg"] = latestEcgSample;
-            hasField = true;
-        }
-        break;
+        // ECG monitor publishes ecg_frame and ecg_ai_window only.
+        // Avoid scalar ECG debug packets that clutter the web dashboard.
+        return;
 
     case SCR_SPO2:
         modeName = "spo2";
@@ -1062,10 +1076,9 @@ static void publishTelemetryIfReady(const WifiConfigManager &wifi, const LcdSens
             doc["temp"] = runtime.mlxBodyTempC();
             hasField = true;
         }
-        if (latestEcgLive)
+        if (latestEcgLive && hasField)
         {
             doc["ecg"] = latestEcgSample;
-            hasField = true;
         }
         break;
 
@@ -1943,7 +1956,7 @@ void ecgSamplingTask(void *pvParameters)
                 wasEcgLive = false;
                 latestEcgLcdY = mapEcgMvToLcdY(0.0f, false);
                 ecgLcdQueueReset();
-                digitalWrite(ECG_DEBUG_LED_PIN, LOW);
+                ecgDebugLedWrite(false);
                 ecgDebugLedOffAt = 0;
             }
         }
@@ -1952,7 +1965,7 @@ void ecgSamplingTask(void *pvParameters)
             wasEcgLive = false;
             latestEcgLcdY = mapEcgMvToLcdY(0.0f, false);
             ecgLcdQueueReset();
-            digitalWrite(ECG_DEBUG_LED_PIN, LOW);
+            ecgDebugLedWrite(false);
             ecgDebugLedOffAt = 0;
         }
 
@@ -2667,19 +2680,19 @@ void guiTask(void *pvParameters)
                 }
 
                 ui_set_measure_all_values(liveTemp, hr, spo2, ecgVal, displayDist);
-                publishEcgFrameIfReady(wifiConfigManager, current_screen_type);
-                logEcgFrameDebugIfReady(current_screen_type);
-                const bool frameSentRecently = lastEcgFramePublishOk && (millis() - lastEcgFramePublishAt < 1200);
-                const float frameP2pMv = (lastEcgFrameMaxMv100 - lastEcgFrameMinMv100) / 100.0f;
+                // MeasureAll keeps ECG as a lightweight scalar/status only.
+                // Full waveform/frame streaming is reserved for ECG Monitor.
+                const bool frameSentRecently = false;
+                const float frameP2pMv = 0.0f;
                 ui_update_measure_all_ecg_status(ecgLive,
                                                  mqttSendEnabled,
                                                  ecgVal,
                                                  hr,
                                                  frameSentRecently,
-                                                 lastEcgFramePublishN,
+                                                 0,
                                                  frameP2pMv,
-                                                 lastEcgFrameClipPct);
-                ui_update_measure_all_ecg_waveform(ecgChart, ecgLive);
+                                                 0);
+                (void)ecgChart;
 
                 if (millis() - lastMeasureAllEcgLog >= ECG_DEBUG_JSON_INTERVAL_MS)
                 {
@@ -2888,7 +2901,10 @@ void setup()
     pinMode(TP5100_CHRG_PIN, INPUT);
     pinMode(TP5100_FULL_PIN, INPUT);
     pinMode(ECG_DEBUG_LED_PIN, OUTPUT);
-    digitalWrite(ECG_DEBUG_LED_PIN, LOW);
+    ecgDebugLedWrite(false);
+    ecgDebugLedWrite(true);
+    delay(120);
+    ecgDebugLedWrite(false);
 
     Serial.printf("[BOOT] reset_reason=%d\n", esp_reset_reason());
     Serial.printf("[BOOT] chip_rev=%d\n", ESP.getChipRevision());
