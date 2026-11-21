@@ -30,7 +30,6 @@ public:
 
     float mlxBodyTempC() const;
     float mlxAmbientTempC() const;
-    void setMlxTargetDistanceMm(float distanceMm);
 
     // INA219 — battery monitor
     bool ina219Ready() const;

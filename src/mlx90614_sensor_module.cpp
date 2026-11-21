@@ -13,8 +13,7 @@ Mlx90614SensorModule::Mlx90614SensorModule(uint8_t sdaPin, uint8_t sclPin)
       ambientTempC_(-999.0f),
       objectFilterSum_(0.0f),
       objectFilterIndex_(0),
-      objectFilterCount_(0),
-      targetDistanceMm_(-1.0f)
+      objectFilterCount_(0)
 {
     for (uint8_t i = 0; i < kObjectFilterSize; ++i)
     {
@@ -34,14 +33,7 @@ bool Mlx90614SensorModule::begin()
     readErrorCount_ = 0;
     lastReadAtMs_ = 0;
     lastRetryAtMs_ = millis();
-    objectFilterSum_ = 0.0f;
-    objectFilterIndex_ = 0;
-    objectFilterCount_ = 0;
-
-    for (uint8_t i = 0; i < kObjectFilterSize; ++i)
-    {
-        objectFilterBuffer_[i] = 0.0f;
-    }
+    resetObjectFilter();
 
     currentSnapshot_.sensorReady = ready_;
     // Require at least one valid sample before exposing LIVE data.
@@ -80,13 +72,7 @@ void Mlx90614SensorModule::update()
         if (ready_)
         {
             readErrorCount_ = 0;
-            objectFilterSum_ = 0.0f;
-            objectFilterIndex_ = 0;
-            objectFilterCount_ = 0;
-            for (uint8_t i = 0; i < kObjectFilterSize; ++i)
-            {
-                objectFilterBuffer_[i] = 0.0f;
-            }
+            resetObjectFilter();
             Serial.println("[MLX90614] Sensor reconnected.");
         }
         return;
@@ -132,16 +118,18 @@ void Mlx90614SensorModule::update()
     }
 
     readErrorCount_ = 0;
+    ambientTempC_ = ambientTempC;
+    currentSnapshot_.sensorReady = true;
 
-    // Smooth the raw object temperature (10-sample moving average @ ~1.5s
-    // interval = ~15s window) before calibration, since IR readings are noisy
-    // sample-to-sample but body temperature changes slowly.
+    // Smooth the raw object temperature (moving average, kObjectFilterSize
+    // samples @ ~1.5s interval) before calibration, since IR readings are
+    // noisy sample-to-sample but body temperature changes slowly.
     const float filteredObjectTempC = pushAndGetFilteredObjectTemp(objectTempC);
     currentSnapshot_.bodyTempC = compensateBodyTemp(filteredObjectTempC, ambientTempC);
-    ambientTempC_ = ambientTempC;
 
-    currentSnapshot_.sensorReady = true;
-    currentSnapshot_.signalReady = true;
+    // Chỉ báo "sẵn sàng" khi moving average đã hội tụ đủ (≥ nửa buffer).
+    // Trước đó filter còn kéo dần từ ambient → body temp → số sẽ sai.
+    currentSnapshot_.signalReady = (objectFilterCount_ >= kObjectFilterSize / 2);
 
     if (nowMs - lastDiagLogAtMs >= 1500)
     {
@@ -164,14 +152,20 @@ float Mlx90614SensorModule::ambientTempC() const
     return ambientTempC_;
 }
 
-void Mlx90614SensorModule::setTargetDistanceMm(float distanceMm)
-{
-    targetDistanceMm_ = distanceMm;
-}
-
 void Mlx90614SensorModule::ensureI2cConfigured()
 {
     Wire.setClock(kI2CFrequencyHz);
+}
+
+void Mlx90614SensorModule::resetObjectFilter()
+{
+    objectFilterSum_ = 0.0f;
+    objectFilterIndex_ = 0;
+    objectFilterCount_ = 0;
+    for (uint8_t i = 0; i < kObjectFilterSize; ++i)
+    {
+        objectFilterBuffer_[i] = 0.0f;
+    }
 }
 
 float Mlx90614SensorModule::pushAndGetFilteredObjectTemp(float rawObjectTempC)
@@ -207,22 +201,10 @@ float Mlx90614SensorModule::compensateBodyTemp(float objectTempC, float ambientT
         skinTempC += (25.0f - ambientTempC) * 0.1f;
     }
 
-    // Distance compensation: the MLX90614's ~35 deg FOV spot grows with
-    // distance, increasingly mixing in cooler surrounding air/background
-    // instead of pure skin, so the raw reading drops as the sensor moves
-    // away from the forehead. The calibration curve below was characterized
-    // at a reference distance of ~30mm, so add back the estimated loss for
-    // larger distances (clamped to a plausible range).
-    if (targetDistanceMm_ > 0.0f && targetDistanceMm_ < 200.0f)
-    {
-        constexpr float kRefDistanceMm = 30.0f;
-        constexpr float kDistanceCoeffCPerMm = 0.02f; // ~0.2 C per extra cm
-        const float extraDistanceMm = targetDistanceMm_ - kRefDistanceMm;
-        if (extraDistanceMm > 0.0f)
-        {
-            skinTempC += constrain(extraDistanceMm * kDistanceCoeffCPerMm, 0.0f, 2.5f);
-        }
-    }
+    // NOTE: no distance compensation. The DCI variant's 5° FOV keeps the IR
+    // spot on the forehead at normal measuring range; VL53L0X distance is
+    // display-only (guides the user to hold 3-4cm). Feeding °C-per-mm here
+    // previously fabricated +2.5°C spikes when pulling the device away.
 
     // Forehead/skin IR temperature reads below oral/core temperature, and the
     // gap narrows as temperature rises (vasodilation brings more blood flow to

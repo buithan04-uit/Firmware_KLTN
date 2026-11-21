@@ -53,7 +53,7 @@ Dự án có ba nhóm chức năng chính:
 - HR/SpO2 với MAX30102 hoặc MAX3010x.
 - Nhiệt độ không tiếp xúc với MLX90614, kết hợp đo khoảng cách bằng VL53L0X cho luồng data collector.
 
-Firmware được chia thành nhiều PlatformIO environment. Mỗi environment chỉ build một nhóm file nguồn thông qua `build_src_filter` trong [platformio.ini](platformio.ini), vì vậy cần chọn đúng environment trong VS Code PlatformIO trước khi build, upload hoặc monitor.
+Firmware hiện chỉ có một PlatformIO environment (`Main`), build đúng nhóm file nguồn khai báo trong `build_src_filter` của [platformio.ini](platformio.ini).
 
 ## Phần cứng
 
@@ -79,27 +79,26 @@ Firmware được chia thành nhiều PlatformIO environment. Mỗi environment 
 
 Lưu ý: với dây dài, I2C chính đang ưu tiên tốc độ thấp hơn để tăng ổn định. Không nên scan toàn dải `0x03` - `0x77` trên một số board vì có thể gây treo bus.
 
-## PlatformIO environments
+## PlatformIO environment
 
 | Environment | Entry point | Mục đích |
 | --- | --- | --- |
-| `Main` | [src/main.cpp](src/main.cpp) | Luồng chính ECG + UI ECG. |
-| `Lcd` | [src/lcd.cpp](src/lcd.cpp) | Dashboard LCD, nhiều màn hình, sensor runtime, WiFi/MQTT. |
-| `Max30102` | [src/max30102.cpp](src/max30102.cpp) | Test HR/SpO2 riêng. |
-| `Mlx90614` | [src/mlx90614.cpp](src/mlx90614.cpp) | Test nhiệt độ riêng. |
-| `Main_Ad8232` | [src/main_ad8232.cpp](src/main_ad8232.cpp) | Luồng ECG tập trung AD8232/ADS1115. |
-| `Collect_mlx_data` | [src/collect_mlx_data.cpp](src/collect_mlx_data.cpp) | Thu mẫu nhiệt độ/khoảng cách và gửi dữ liệu. |
+| `Main` | [src/main.cpp](src/main.cpp) | Firmware tích hợp: UI LCD LVGL, ECG, HR/SpO2, nhiệt độ, khoảng cách, battery, WiFi/MQTT. |
+
+Chi tiết kiến trúc runtime xem [FIRMWARE_ARCHITECTURE.md](FIRMWARE_ARCHITECTURE.md).
 
 ## Kiến trúc firmware
 
 | Module | File chính |
 | --- | --- |
+| Flow chính | [src/main.cpp](src/main.cpp) |
 | ECG core | [src/ad8232.cpp](src/ad8232.cpp), [include/ad8232.h](include/ad8232.h) |
-| ECG UI | [src/ui_ecg.cpp](src/ui_ecg.cpp), [include/ui_ecg.h](include/ui_ecg.h) |
+| ECG sensor module | [src/ad8232_sensor_module.cpp](src/ad8232_sensor_module.cpp), [include/ad8232_sensor_module.h](include/ad8232_sensor_module.h) |
 | LCD runtime | [src/lcd_sensor_runtime.cpp](src/lcd_sensor_runtime.cpp), [include/lcd_sensor_runtime.h](include/lcd_sensor_runtime.h) |
 | LCD presenter | [src/lcd_ui_presenter.cpp](src/lcd_ui_presenter.cpp), [include/lcd_ui_presenter.h](include/lcd_ui_presenter.h) |
 | UI tổng quát | [src/ui.cpp](src/ui.cpp), [include/ui.h](include/ui.h) |
 | Data collector UI | [src/ui_datacollector.cpp](src/ui_datacollector.cpp), [include/ui_datacollector.h](include/ui_datacollector.h) |
+| Boot screen | [src/boot_screen.cpp](src/boot_screen.cpp), [include/boot_screen.h](include/boot_screen.h) |
 | WiFi config | [src/wifi_config_manager.cpp](src/wifi_config_manager.cpp), [include/wifi_config_manager.h](include/wifi_config_manager.h) |
 | LVGL config | [include/lv_conf.h](include/lv_conf.h) |
 | Icon LVGL | [include/custom_icons.h](include/custom_icons.h), [src/icons](src/icons) |
@@ -169,8 +168,17 @@ Luồng `Collect_mlx_data` kết hợp MLX90614 và VL53L0X:
 
 ## Lưu ý kỹ thuật
 
-- Trong LCD env, `TFT_eSPI tft` phải được định nghĩa trong [src/lcd.cpp](src/lcd.cpp), không chỉ khai báo `extern`.
+- `TFT_eSPI tft` phải được định nghĩa trong [src/main.cpp](src/main.cpp), không chỉ khai báo `extern`.
 - ECG UI nên cập nhật khoảng 8 ms và không bị gate bởi cadence UI 80 ms.
 - LVGL chart ECG nên dùng SHIFT mode để waveform liên tục.
 - Khi thoát màn hình cấu hình WiFi, tránh reconnect blocking; nên để reconnect trong async update loop.
 - Một số tính năng mới hiện mới ở mức UI-only, chưa nối đầy đủ logic backend.
+
+## Tài liệu khác
+
+- [FIRMWARE_ARCHITECTURE.md](FIRMWARE_ARCHITECTURE.md) — kiến trúc runtime chi tiết (task, mutex I2C, MQTT, UI).
+- [HARDWARE_WIRING.md](HARDWARE_WIRING.md) — GPIO, I2C, wiring AD8232/ADS1115, điện cực.
+- [ECG_GUIDE.md](ECG_GUIDE.md) — hướng dẫn dùng và khắc phục sự cố ECG.
+- [PCB_DESIGN_GUIDE.md](PCB_DESIGN_GUIDE.md) — thiết kế PCB cho khóa luận.
+- [ROADMAP_AND_TESTING.md](ROADMAP_AND_TESTING.md) — lộ trình phát triển và checklist test breadboard.
+- [AGENTS.md](AGENTS.md) — ghi chú nhanh cho agent.

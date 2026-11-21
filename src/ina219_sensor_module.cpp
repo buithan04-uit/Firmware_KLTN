@@ -168,7 +168,11 @@ void INA219SensorModule::update()
     // Giả sử điện trở nội của pin + dây + mạch bảo vệ là ~0.25 Ohm
     // Khi sạc, V đo bị đội lên -> công thức này (với current âm) sẽ trừ bớt phần đội lên đó.
     // ========================================================
-    const float kInternalResistanceOhm = 0.25f;
+    // Đo thực nghiệm từ log (2026-07-04): tải nhẹ 13.8mA -> 7.913V,
+    // tải nặng ~133mA -> ~7.65V  =>  R ≈ 0.27V / 0.119A ≈ 2.2Ω
+    // (gồm pin 2S + mạch bảo vệ + dây + jack). Để 1.8Ω hơi non để không
+    // bù quá tay; nếu % vẫn tụt nhanh khi vào màn hình đo thì tăng dần lên 2.0-2.2.
+    const float kInternalResistanceOhm = 1.8f;
     float v_rest = loadV + (current / 1000.0f) * kInternalResistanceOhm;
 
     // ---- EMA filter voltage ----
@@ -307,8 +311,11 @@ void INA219SensorModule::setBatteryType(BatteryType type)
 
 void INA219SensorModule::ensureI2cConfigured()
 {
-    Wire.setClock(50000);
-    Wire.setTimeOut(500);
+    // Đồng bộ với chuẩn bus I2C0 chung (MAX30102/MLX90614/VL53L0X đều 100kHz):
+    // trước đây để 50kHz + timeout 500ms gây flip-flop tốc độ bus liên tục
+    // và có thể block tới 0.5s khi bus kẹt. INA219 hỗ trợ tới 400kHz.
+    Wire.setClock(100000);
+    Wire.setTimeOut(100);
 }
 
 void INA219SensorModule::getBatteryRange(float &vMin, float &vMax) const

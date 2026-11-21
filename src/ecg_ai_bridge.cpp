@@ -238,7 +238,8 @@ bool EcgAiBridge::extractWindow(int peakIdx)
         int idx = (startIdx + i) & (AI_RESAMP_BUF_SIZE - 1);
         float mv = rsmpBuf_[idx];
 
-        // z = (x/gain - MEAN) / STD — xem giải thích AI_GAIN_* trong header
+        // z = (x/gain - MEAN) / STD — khớp pipeline train: signal mV thô của
+        // MIT-BIH được scale (x-MEAN)/STD với MEAN/STD là hằng số global.
         float mv_body = mv / gain;
         window_[i] = (mv_body - MITBIH_MEAN) / MITBIH_STD;
 

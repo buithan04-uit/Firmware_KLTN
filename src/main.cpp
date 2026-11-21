@@ -36,7 +36,10 @@ static constexpr uint8_t STATE_CONFIRM_TICKS = 3;
 static constexpr uint32_t LIVE_LOG_INTERVAL_MS = 1500;
 static constexpr uint32_t MQTT_RECONNECT_INTERVAL_MS = 10000;
 static constexpr uint32_t MQTT_PUBLISH_INTERVAL_MS = 700;
-static constexpr uint32_t MQTT_ECG_FRAME_INTERVAL_MS = 250;
+// 200ms => ~50 mẫu mới/frame @250Hz, dư ~28% so với trần 64 điểm/frame.
+// Ở 250ms (62.5 mẫu) chỉ cần loop trễ nhẹ là vượt trần -> bucket-merge nén
+// thời gian -> web phát nhanh hơn thực tế -> hết hàng đợi -> sóng khựng.
+static constexpr uint32_t MQTT_ECG_FRAME_INTERVAL_MS = 200;
 static constexpr uint32_t MQTT_OK_LOG_INTERVAL_MS = 1500;
 static constexpr uint8_t MQTT_MAX_CONNECT_FAILS = 3;
 static constexpr uint8_t TP5100_CHRG_PIN = 34; // TLP521-2 output CHRG, active LOW
@@ -777,7 +780,7 @@ static void publishEcgFrameIfReady(const WifiConfigManager &wifi, ScreenType act
                        "\"n\":%u,\"unit\":\"mV_output\",\"display\":\"lcd_y\",\"downsample\":\"new_samples\",\"ecg\":%.2f,"
                        "\"hr\":%d,\"hr_ecg\":%d,\"hr_ppg\":%d,\"hr_source\":\"%s\","
                        "\"min_mv\":%.2f,\"max_mv\":%.2f,\"p2p_mv\":%.2f,\"clip_pct\":%u,\"clip\":%u,\"display_clip_pct\":%u,\"adc_clip_pct\":%u,\"quality\":\"%s\","
-                       "\"lcd_y_origin\":\"bottom\",\"ecg_points\":[",
+                       "\"lcd_y_origin\":\"bottom\",\"mv\":[",
                        mqttDeviceId.c_str(),
                        activeScreen == SCR_MEASUREALL ? "measure_all" : "ecg",
                        static_cast<unsigned long>(seq),
@@ -807,23 +810,6 @@ static void publishEcgFrameIfReady(const WifiConfigManager &wifi, ScreenType act
                         mv100[i] / 100.0f);
     }
 
-    pos += snprintf(payload + pos, sizeof(payload) - pos, "],\"mv\":[");
-    for (uint8_t i = 0; i < n && pos < static_cast<int>(sizeof(payload)) - 24; i++)
-    {
-        pos += snprintf(payload + pos,
-                        sizeof(payload) - pos,
-                        i + 1 < n ? "%.2f," : "%.2f",
-                        mv100[i] / 100.0f);
-    }
-
-    pos += snprintf(payload + pos, sizeof(payload) - pos, "],\"ecg_lcd_points\":[");
-    for (uint8_t i = 0; i < n && pos < static_cast<int>(sizeof(payload)) - 8; i++)
-    {
-        pos += snprintf(payload + pos,
-                        sizeof(payload) - pos,
-                        i + 1 < n ? "%u," : "%u",
-                        static_cast<unsigned>(y[i]));
-    }
     pos += snprintf(payload + pos, sizeof(payload) - pos, "],\"y\":[");
     for (uint8_t i = 0; i < n && pos < static_cast<int>(sizeof(payload)) - 8; i++)
     {
@@ -920,7 +906,7 @@ static void logEcgFrameDebugIfReady(ScreenType activeScreen)
                        "\"n\":%u,\"unit\":\"mV_output\",\"display\":\"lcd_y\",\"downsample\":\"new_samples\",\"ecg\":%.2f,"
                        "\"hr\":%d,\"hr_ecg\":%d,\"hr_ppg\":%d,\"hr_source\":\"%s\","
                        "\"min_mv\":%.2f,\"max_mv\":%.2f,\"p2p_mv\":%.2f,\"clip_pct\":%u,\"clip\":%u,\"display_clip_pct\":%u,\"adc_clip_pct\":%u,\"quality\":\"%s\","
-                       "\"lcd_y_origin\":\"bottom\",\"ecg_points\":[",
+                       "\"lcd_y_origin\":\"bottom\",\"mv\":[",
                        mqttDeviceId.c_str(),
                        activeScreen == SCR_MEASUREALL ? "measure_all" : "ecg",
                        static_cast<unsigned long>(seq),
@@ -950,23 +936,6 @@ static void logEcgFrameDebugIfReady(ScreenType activeScreen)
                         mv100[i] / 100.0f);
     }
 
-    pos += snprintf(payload + pos, sizeof(payload) - pos, "],\"mv\":[");
-    for (uint8_t i = 0; i < n && pos < static_cast<int>(sizeof(payload)) - 24; i++)
-    {
-        pos += snprintf(payload + pos,
-                        sizeof(payload) - pos,
-                        i + 1 < n ? "%.2f," : "%.2f",
-                        mv100[i] / 100.0f);
-    }
-
-    pos += snprintf(payload + pos, sizeof(payload) - pos, "],\"ecg_lcd_points\":[");
-    for (uint8_t i = 0; i < n && pos < static_cast<int>(sizeof(payload)) - 8; i++)
-    {
-        pos += snprintf(payload + pos,
-                        sizeof(payload) - pos,
-                        i + 1 < n ? "%u," : "%u",
-                        static_cast<unsigned>(y[i]));
-    }
     pos += snprintf(payload + pos, sizeof(payload) - pos, "],\"y\":[");
     for (uint8_t i = 0; i < n && pos < static_cast<int>(sizeof(payload)) - 8; i++)
     {
@@ -1630,8 +1599,8 @@ static void collect_recover_i2c()
     Wire.end();
     delay(50);
     Wire.begin(21, 22);
-    Wire.setClock(50000);
-    Wire.setTimeOut(500);
+    Wire.setClock(100000);
+    Wire.setTimeOut(100);
     collectLox.begin();
 }
 
@@ -2103,8 +2072,10 @@ void guiTask(void *pvParameters)
         if (mlxSamplingRequired && millis() - lastMlxDistanceUpdate >= 200)
         {
             lastMlxDistanceUpdate = millis();
+            // Khoảng cách chỉ đo để hiển thị realtime cho người dùng căn vị trí
+            // (3-4cm); KHÔNG đưa vào thuật toán nhiệt độ (MLX90614-DCI FOV 5°,
+            // không có tài liệu tích hợp VL53L0X vào công thức bù nhiệt).
             collectLastDistance = collect_live_distance();
-            sensorRuntime.setMlxTargetDistanceMm(collectLastDistance);
         }
 
         updateTp5100ChargeStatus();

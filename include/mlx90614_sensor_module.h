@@ -16,10 +16,11 @@ public:
 
     float ambientTempC() const;
 
-    // Called by the main loop with the latest VL53L0X distance (mm) between
-    // the sensor and the target so compensateBodyTemp() can correct for the
-    // IR spot growing/cooling with distance. Pass <=0 or >=999 for "unknown".
-    void setTargetDistanceMm(float distanceMm);
+    // NOTE: VL53L0X distance is intentionally NOT fed into this module.
+    // The DCI variant's 5deg FOV keeps the IR spot on the forehead at normal
+    // measuring range; distance is only shown on the UI so the user can hold
+    // the device at 3-4cm. Feeding it into the temperature math previously
+    // fabricated +2.5C spikes when pulling the device away.
 
 private:
     static constexpr uint32_t kReadIntervalMs = 1500;
@@ -50,9 +51,9 @@ private:
     float objectFilterSum_;
     uint8_t objectFilterIndex_;
     uint8_t objectFilterCount_;
-    float targetDistanceMm_;
 
     void ensureI2cConfigured();
+    void resetObjectFilter();
     float pushAndGetFilteredObjectTemp(float rawObjectTempC);
     float compensateBodyTemp(float objectTempC, float ambientTempC) const;
     static bool isValidSample(float objectTempC, float ambientTempC);

@@ -27,7 +27,7 @@ Max30102SensorModule::Max30102SensorModule(uint8_t sdaPin, uint8_t sclPin)
 
 bool Max30102SensorModule::begin()
 {
-    Wire.setClock(50000);
+    Wire.setClock(100000);
 
     if (!sensor_.begin(Wire, I2C_SPEED_STANDARD))
     {
@@ -117,8 +117,12 @@ void Max30102SensorModule::update()
                 currentSnapshot_.heartRateBpm = static_cast<int>(filteredHeartRate_ + 0.5);
                 lastValidHrTime_ = now;
 
-                Serial.printf("[MAX30102] ✓ Beat! HR=%d bpm, delta=%lums\n",
-                              currentSnapshot_.heartRateBpm, delta);
+                static unsigned long lastBeatLog = 0;
+                if (now - lastBeatLog >= 5000)
+                {
+                    lastBeatLog = now;
+                    Serial.printf("[MAX30102] HR=%d bpm\n", currentSnapshot_.heartRateBpm);
+                }
             }
 
             lastBeatTime = now;
@@ -128,18 +132,37 @@ void Max30102SensorModule::update()
         currentSnapshot_.waveform = toPlethScale(ir);
 
         // ========== LƯU DATA VÀO BUFFER ĐỂ TÍNH SPO2 ==========
-        if (bufferCount_ < kBufferSize)
+        // Kiểm tra IR ổn định: bỏ qua mẫu nếu IR thay đổi >15% so với mẫu trước.
+        // Tránh buffer bị "ô nhiễm" khi vừa đặt/nhấc ngón tay (IR nhảy mạnh).
+        static uint32_t lastIrForStability = 0;
+        const bool irStable = (lastIrForStability == 0) ||
+                              (ir > lastIrForStability * 85 / 100 &&
+                               ir < lastIrForStability * 115 / 100);
+        lastIrForStability = ir;
+
+        if (irStable)
         {
-            redBuffer_[bufferCount_] = red;
-            irBuffer_[bufferCount_] = ir;
-            bufferCount_++;
+            if (bufferCount_ < kBufferSize)
+            {
+                redBuffer_[bufferCount_] = red;
+                irBuffer_[bufferCount_] = ir;
+                bufferCount_++;
+            }
+            else
+            {
+                memmove(redBuffer_, redBuffer_ + 1, (kBufferSize - 1) * sizeof(uint32_t));
+                memmove(irBuffer_, irBuffer_ + 1, (kBufferSize - 1) * sizeof(uint32_t));
+                redBuffer_[kBufferSize - 1] = red;
+                irBuffer_[kBufferSize - 1] = ir;
+            }
         }
         else
         {
-            memmove(redBuffer_, redBuffer_ + 1, (kBufferSize - 1) * sizeof(uint32_t));
-            memmove(irBuffer_, irBuffer_ + 1, (kBufferSize - 1) * sizeof(uint32_t));
-            redBuffer_[kBufferSize - 1] = red;
-            irBuffer_[kBufferSize - 1] = ir;
+            // IR không ổn định → reset buffer để SpO2 không tính từ data hỗn độn
+            bufferCount_ = 0;
+            samplesSinceCalc_ = 0;
+            filteredSpo2_ = 0.0;
+            currentSnapshot_.spo2Percent = 0;
         }
 
         if (bufferCount_ == kBufferSize)
@@ -172,31 +195,31 @@ void Max30102SensorModule::update()
 
         double rmsSpo2 = calculateRmsSpo2(redBuffer_, irBuffer_, kBufferSize);
 
-        // Clamping hợp lý
-        if (rmsSpo2 > 100.0)
-            rmsSpo2 = 100.0;
-        if (rmsSpo2 < 70.0)
-            rmsSpo2 = 70.0;
-
-        // Chỉ cập nhật nếu giá trị hợp lý
-        if (rmsSpo2 >= 70.0 && rmsSpo2 <= 100.0)
+        // 0.0 = tín hiệu không hợp lệ (không có ngón tay hoặc AC quá nhỏ)
+        if (rmsSpo2 > 0.0)
         {
+            if (rmsSpo2 > 100.0) rmsSpo2 = 100.0;
+            if (rmsSpo2 < 70.0)  rmsSpo2 = 70.0;
+
             if (filteredSpo2_ <= 0.0)
             {
                 filteredSpo2_ = rmsSpo2;
             }
             else
             {
-                // EMA với hệ số 0.6 (mượt hơn)
                 filteredSpo2_ = (0.6 * filteredSpo2_) + (0.4 * rmsSpo2);
             }
+
+            currentSnapshot_.spo2Percent = static_cast<int>(filteredSpo2_ + 0.5);
+
+            static unsigned long lastSpo2Log = 0;
+            if (millis() - lastSpo2Log >= 5000)
+            {
+                lastSpo2Log = millis();
+                Serial.printf("[MAX30102] SPO2: raw=%.1f%%, filtered=%.1f%%, final=%d%%\n",
+                              rmsSpo2, filteredSpo2_, currentSnapshot_.spo2Percent);
+            }
         }
-
-        currentSnapshot_.spo2Percent = static_cast<int>(filteredSpo2_ + 0.5);
-
-        // DEBUG
-        Serial.printf("[MAX30102] SPO2: raw=%.1f%%, filtered=%.1f%%, final=%d%%\n",
-                      rmsSpo2, filteredSpo2_, currentSnapshot_.spo2Percent);
     }
 
     // ========== HOLD LOGIC: GIỮ NHỊP TIM KHI BỊ NHIỄU NGẮN HẠN ==========
@@ -248,7 +271,7 @@ double Max30102SensorModule::calculateRmsSpo2(const uint32_t *redBuf, const uint
 
     if (aveRed <= 1.0 || aveIr <= 1.0)
     {
-        return 95.0; // Giá trị mặc định an toàn khi không có tín hiệu
+        return 0.0; // 0 = không có tín hiệu, không phải SpO2 thật
     }
 
     // Tính tổng bình phương độ lệch (AC RMS)
@@ -262,7 +285,7 @@ double Max30102SensorModule::calculateRmsSpo2(const uint32_t *redBuf, const uint
 
     if (sumRedRms <= 0.0 || sumIrRms <= 0.0)
     {
-        return 95.0; // Không thể tính được, trả về giá trị an toàn
+        return 0.0; // AC quá nhỏ — ngón tay không đặt đúng hoặc tín hiệu phẳng
     }
 
     // Tính AC RMS
@@ -273,16 +296,13 @@ double Max30102SensorModule::calculateRmsSpo2(const uint32_t *redBuf, const uint
     double ratioRed = acRed / aveRed;
     double ratioIr = acIr / aveIr;
 
-    // Công thức tính SpO2 từ AC/DC ratio
+    // Công thức tính SpO2 từ AC/DC ratio R = (AC_Red/DC_Red) / (AC_IR/DC_IR)
     double ratio = ratioRed / ratioIr;
 
-    // Công thức linearize từ ratio -> SpO2
-    // Nếu ratio thấp = nhiều IR hơn RED = SpO2 cao
-    // Nếu ratio cao = ít IR hơn RED = SpO2 thấp
-    double spo2 = 110.0 - (ratio * 25.0);
-
-    Serial.printf("[MAX30102-SPO2] DC:R=%.0f/I=%.0f | AC:R=%.1f/I=%.1f | ratio=%.4f -> SpO2=%.1f%%\n",
-                  aveRed, aveIr, acRed, acIr, ratio, spo2);
+    // Quadratic empirical formula (Maxim AN6409, calibrated for MAX30102 660nm/940nm).
+    // Chính xác hơn linear "110-25R" đặc biệt ở vùng 95-100% và 85-94%.
+    // Sai số ±2% so với pulse oximeter chuẩn; cần calibration phần cứng để đạt ±1%.
+    double spo2 = -45.060 * ratio * ratio + 30.354 * ratio + 94.845;
 
     return spo2;
 }
